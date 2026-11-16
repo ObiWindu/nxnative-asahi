@@ -3,7 +3,9 @@
 `fedora-asahi/nxnative-asahi.spec` builds on Fedora Asahi Remix 44. It is not a
 signed release artifact yet, but a local RPM builds and installs (verified on
 the reference machine). `packaging/build_rpm.sh` automates the source tarball
-and `rpmbuild` run; pass a profile title ID to package a host for it.
+and `rpmbuild` run; pass a profile title ID to package a host for it. CI
+(`.github/workflows/ci.yml`) builds and uploads both variants on Fedora 44
+AArch64.
 
 A release needs a decision the source tree does not make for the packager: the
 host is currently built per game profile (`NXNATIVE_GAME=<base title ID>`) and

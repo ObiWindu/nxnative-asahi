@@ -38,7 +38,7 @@ class Labels(unittest.TestCase):
         self.assertEqual(self.names('dm/gfx/tools/dmsh_mtlcache.py'), set())   # a dmsh_ tool outside the chain
         self.assertEqual(self.names('scripts/build_ipa_from_nsp.py'), {'packing', 'tools'})
         self.assertEqual(self.names('scripts/build_asahi_from_nsp.py'), {'packing', 'tools'})
-        self.assertEqual(self.names('README.md', '.github/workflows/tests.yml'), {'docs', 'ci'})
+        self.assertEqual(self.names('README.md', '.github/workflows/ci.yml'), {'docs', 'ci'})
 
     def test_game(self):
         out = pr_areas.labels([f'dm/games/{BOTW}/README.md'], self.root)

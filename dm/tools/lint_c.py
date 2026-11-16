@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# C and Objective-C lint of dm/host and dm/gfx, as CI runs it (.github/workflows/lint-c.yml). Two commands:
+# C and Objective-C lint of dm/host and dm/gfx for a local check (CI does not run it). Two commands:
 #   compdb  writes the compile database dm/host/gen/compile_commands.json from dry runs of the Makefiles (make -n -B): the host (dm/host), the texture tests (dm/gfx/tex/tests),
 #           every graphics test (dm/gfx/tests), the host tests (dm/host/tests) and the Metal sample (dm/gfx/metal), all for one profile (--game, default GAME or Super Mario Bros. Wonder).
 #           A source compiled by several of them keeps the first command (the host's). Third-party sources (dm/third_party) are left out.
@@ -8,14 +8,14 @@
 #           do fewer (a fixed finding still listed: run --update). So the baseline only shrinks:
 #             --update      lowers counts to what the code has now and drops fixed entries; it never adds one (a new finding is fixed, or, when it is a false positive, silenced
 #                           on its line with `// NOLINT(<check>)` and a reason)
-#             --rebaseline  writes every current finding: only with a raised LLVM_VERSION in .github/workflows/lint-c.yml, whose findings change with it
-#             --against REV fails when the baseline has an entry or a count that REV's has not, unless LLVM_VERSION increased since REV (CI uses the pull request's base)
+#             --rebaseline  writes every current finding: only with a raised LLVM version, whose findings change with it
+#             --against REV fails when the baseline has an entry or a count that REV's has not, unless LLVM_VERSION increased since REV
 #           --report FILE writes every finding with its line. Sources named on the command line are checked alone: quicker while fixing, but such a run does not report fixed
 #           findings (a file's findings also come from the sources including it).
 # Under GitHub Actions, tidy also writes to the job summary.
 # LLVM's clang-tidy is needed (Apple's toolchain has none): LLVM=<folder with bin/> (a release from github.com/llvm/llvm-project), else Homebrew's llvm@23 or llvm, else PATH.
-# The baseline names the LLVM it was made with, the release CI downloads (LLVM_VERSION in .github/workflows/lint-c.yml; test_lint_c.py keeps the two in step); another major
-# version finds other things, and tidy says so.
+# The baseline names the LLVM it was made with; another major version finds other things, and tidy says so. `--against` reads the LLVM pin from the upstream
+# `.github/workflows/lint-c.yml`, which this Asahi fork no longer carries.
 # Usage: lint_c.py compdb [--game ID] | tidy [--update | --rebaseline] [--against REV] [--report FILE] [-j N] [FILE...]
 import argparse, collections, concurrent.futures, json, os, pathlib, re, shlex, shutil, subprocess, sys
 
@@ -168,7 +168,7 @@ def write_baseline(counts, version):
 def git(*a): return subprocess.run(['git', *a], cwd=REPO, capture_output=True, text=True)
 
 def llvm_pin(text):
-    # LLVM_VERSION of lint-c.yml as a tuple, or None
+    # LLVM_VERSION from a workflow file as a tuple, or None
     m = re.search(r'^\s+LLVM_VERSION: (\d+)\.(\d+)\.(\d+)$', text, re.M)
     return tuple(map(int, m.groups())) if m else None
 

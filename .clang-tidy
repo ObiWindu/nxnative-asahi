@@ -1,4 +1,4 @@
-# Checks CI runs on dm/host and dm/gfx (.github/workflows/lint-c.yml, dm/tools/lint_c.py tidy): ones that find bugs, not style, and clang's static analyzer. The findings
+# Checks dm/tools/lint_c.py tidy runs on dm/host and dm/gfx (a local check; CI does not run it): ones that find bugs, not style, and clang's static analyzer. The findings
 # the code had when this came in are a baseline (dm/tools/lint_c_baseline.tsv) that a pull request may not grow. A check left out says why on its line: it mostly flags
 # a deliberate idiom of this code base, so its findings would be thousands of baseline entries and no bugs.
 Checks:

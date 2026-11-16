@@ -65,13 +65,20 @@ static void test_basic(void) {
     int rc = nx_mem_protect(r, (uint64_t)(uintptr_t)r->base + 0x4000, 0x1000, NX_PAGE_READ);
     CHECK(rc == 0, "protect one 4 KiB guest page read-only (rc %d)", rc);
     CHECK(!(nx_mem_perm(r, (uint64_t)(uintptr_t)r->base + 0x4000) & NX_PAGE_WRITE), "guest table says the page is read-only");
-    /* The 16 KiB host page holds one read-only and three read-write 4 KiB
-       guest pages. The kernel cannot express that split, so the page keeps the
-       union (RW); the approximation is counted below. */
-    CHECK(nx_mem_effective_host_prot(r, (uint64_t)(uintptr_t)r->base + 0x4000) == (PROT_READ | PROT_WRITE),
-          "host page keeps the union of its four guest pages (RW)");
-    int approx = nx_mem_approximate_pages(r);
-    CHECK(approx >= 1, "mixed host page reported as approximate (%d page(s))", approx);
+    /* On a 16 KiB Asahi host page, the page holds one read-only and three
+       read-write 4 KiB guest pages. The kernel cannot express that split, so
+       the page keeps the union (RW) and the approximation is counted below. A
+       4 KiB host page (a portable CI runner) enforces the guest page alone. */
+    if (hp > gp) {
+        CHECK(nx_mem_effective_host_prot(r, (uint64_t)(uintptr_t)r->base + 0x4000) == (PROT_READ | PROT_WRITE),
+              "host page keeps the union of its four guest pages (RW)");
+        int approx = nx_mem_approximate_pages(r);
+        CHECK(approx >= 1, "mixed host page reported as approximate (%d page(s))", approx);
+    } else {
+        CHECK(nx_mem_effective_host_prot(r, (uint64_t)(uintptr_t)r->base + 0x4000) == PROT_READ,
+              "4 KiB host page enforces the read-only guest page exactly");
+        CHECK(nx_mem_approximate_pages(r) == 0, "an exact 4 KiB host page reports no approximation");
+    }
     nx_mem_destroy(r);
 }
 
@@ -117,10 +124,10 @@ static void test_dirty(void) {
     g_dirty_faults = 0;
     if (!sigsetjmp(g_dirty_jmp, 1)) {
         volatile uint8_t *q = r->base;
-        q[0x2000] = 1;   /* first write faults, the handler unprotects the host page */
+        q[hp / 2] = 1;   /* first write faults, the handler unprotects the host page */
     }
     CHECK(g_dirty_faults == 1, "write fault was handled exactly once (%d)", (int)g_dirty_faults);
-    r->base[0x0] = 3; r->base[0x3000] = 2;   /* the host page is writable again after the fault */
+    r->base[0x0] = 3; r->base[hp - 1] = 2;   /* the host page is writable again after the fault */
     int dirty = 0;
     for (size_t i = 0; i < r->guest_pages; i++) if (nx_mem_perm(r, (uint64_t)(uintptr_t)(r->base + i * nx_guest_page_size())) & NX_PAGE_DIRTY) dirty++;
     CHECK(dirty == (int)(hp / nx_guest_page_size()), "all %zu guest pages in the host page are marked dirty (%d)", hp / nx_guest_page_size(), dirty);

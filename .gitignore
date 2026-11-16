@@ -20,3 +20,4 @@ build-*/
 build_*/
 cmake-build-*/
 out/
+dist/

@@ -1,0 +1,117 @@
+# Build, test and package nxnative-asahi for Asahi Linux.
+#
+# The target is Fedora Asahi Remix on Apple Silicon, so every job runs in a
+# Fedora 44 userland on an AArch64 runner. GitHub has no Apple GPU and no game
+# files: the tests use Mesa's lavapipe (NX_VK_ALLOW_CPU=1), and a game on
+# Honeykrisp still has to be run locally (docs/BUILDING.md, Tests).
+#
+# Actions are pinned to commit SHAs (the tag in the comment), as in the other
+# workflows: a tag can be moved, a SHA cannot. Dependabot (github-actions) can
+# raise them.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new commit on a pull request replaces its older run; a push to main always
+# finishes, as the release package is built from it.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Super Mario Bros. Wonder: the profile the host and the NVN replay tests are
+  # built for. Any repository profile does; the tests are about code, not the game.
+  GAME: 010015100B514000
+
+jobs:
+  build:
+    name: Build (Fedora Asahi 44, AArch64)
+    runs-on: ubuntu-24.04-arm
+    container: fedora:44
+    timeout-minutes: 30
+    steps:
+      - name: Install git for the checkout
+        run: dnf install -y --setopt=install_weak_deps=False git tar gzip
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the build dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          cmake ninja-build gcc python3
+          vulkan-loader-devel vulkan-headers
+      - name: Configure and build without a game profile
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNXNATIVE_BUILD_TESTS=ON
+          cmake --build build -j"$(nproc)"
+
+  test:
+    name: Test (Fedora Asahi 44, AArch64)
+    runs-on: ubuntu-24.04-arm
+    container: fedora:44
+    timeout-minutes: 45
+    steps:
+      - name: Install git for the checkout
+        run: dnf install -y --setopt=install_weak_deps=False git tar gzip
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the test dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          cmake ninja-build gcc python3 python3-pip
+          vulkan-loader-devel vulkan-headers mesa-vulkan-drivers SDL3 libshaderc
+      - name: Build a profile host and run CTest
+        env:
+          NX_VK_ALLOW_CPU: '1'   # no GPU on the runner: Mesa's lavapipe renders the tests
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.aarch64.json   # do not probe the absent Asahi GPU
+          # lavapipe crashes inside lp_jit_bindless_texture_from_pipe for the
+          # buffer-texture draw; the test passes on Honeykrisp and in a local run.
+          CTEST_ARGS: '-E nvn_tbuf'
+        run: GAME="$GAME" BUILD_DIR=build scripts/build_asahi.sh
+      - name: Python tool tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/py"
+          "$RUNNER_TEMP/py/bin/pip" install --disable-pip-version-check \
+            pytest==9.2.0 lz4==4.4.5 capstone==5.0.9 fonttools==4.68.0
+          "$RUNNER_TEMP/py/bin/python" -m pytest dm/tools/tests -q
+
+  package:
+    name: Package (Fedora RPM)
+    runs-on: ubuntu-24.04-arm
+    container: fedora:44
+    timeout-minutes: 30
+    steps:
+      - name: Install git for the checkout
+        run: dnf install -y --setopt=install_weak_deps=False git tar gzip
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the packaging dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          cmake ninja-build gcc python3 rpm-build tar gzip
+          vulkan-loader-devel vulkan-headers
+      - name: Build the platform RPM
+        run: RPM_OUT=dist/platform packaging/build_rpm.sh
+      - name: Build the profile RPM
+        run: RPM_OUT=dist/game packaging/build_rpm.sh "$GAME"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nxnative-asahi-rpm
+          path: |
+            dist/platform/*.rpm
+            dist/game/*.rpm
+          if-no-files-found: error
+          retention-days: 30

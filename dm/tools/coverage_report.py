@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Coverage summary for the job summary of CI's coverage job (.github/workflows/tests.yml): line coverage per area, the largest files, and the diff coverage of a change.
+# Coverage summary for a local measurement: line coverage per area, the largest files, and the diff coverage of a change. CI does not run coverage.
 # It reads what the measuring tools wrote and prints Markdown; it never fails on coverage (report only), only on a missing or unreadable input it was given.
 #   --host / --textures   llvm-cov's lcov export (make -C dm/host/tests GAME=<id> coverage: dm/host/tests/build/cov/coverage.lcov; make -C dm/gfx/tex/tests coverage:
 #                         dm/gfx/tex/tests/cov/coverage.lcov). Its DA lines are llvm-cov's own line counts, the lines `llvm-cov show` marks, one view for totals and diff

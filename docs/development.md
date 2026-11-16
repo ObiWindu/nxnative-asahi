@@ -158,164 +158,44 @@ Python standard library; LZ4 is loaded when decoding NSO files.
 
 ## Continuous integration
 
-`.github/workflows/tests.yml` runs host and CPU graphics tests, Python tool
-tests, Mac builds for NVN/Vulkan/OpenGL profiles, and iOS source compilation.
-It also runs the CPU texture layout/deswizzle test (`dm/gfx/tex/tests/t_tex`)
-and the host's `tsan` and `memory-tsan` targets for audio and memory races.
-The texture format test (`t_fmt_mtl`) creates Metal textures and stays local.
-All five macOS jobs, including the sanitizer job, run with the toolchain the
-project supports: Xcode 27.1 on GitHub's `xcode-27` image, named by path in
-`DEVELOPER_DIR` so a new default Xcode on the image does not change CI. The
-build check first compares the image's Metal compiler with `dmsh_chain.lock`
-(`own_compilers.py --check-metal`), and `dm/tools/tests/test_ci_toolchain.py`
-keeps the workflow, the image, README and the NSP script naming the same
-Xcode: raising the toolchain changes them together.
+`.github/workflows/ci.yml` builds, tests and packages the Asahi Linux port on
+every pull request and push to `main`. All three jobs run in a Fedora 44
+container on an AArch64 runner (`ubuntu-24.04-arm`), the same userland as Fedora
+Asahi Remix:
 
-A separate `sanitizers` job builds the same tests again with sanitizers, each
-build in a folder of its own (`build/asan`, `build/tsan`, `asan/`): every host
-unit test and the CPU texture test under AddressSanitizer and
-UndefinedBehaviorSanitizer (`asan`), and the host tests that start threads under
-ThreadSanitizer (`tsan-threads`). Documented exceptions live in
-`dm/sanitizers/`: ASan and UBSan in `ignorelist.txt` (compile time), TSan in
-`tsan.supp` (run time). These cover custom HLE sections, synthetic NRO offsets,
-an intentionally unjoined test and uninstrumented CoreAudio synchronization.
-The job fails on other findings. The initial header-alignment, AudioUnit
-publication and thread-registration bugs were fixed and their suppressions
-removed ([audio](reference/audio.md#unaligned-command-headers-during-layout-probing),
-[AudioUnit publication](reference/audio.md#audiounit-construction-before-output-publication),
-[thread registration](reference/threads.md#publishing-a-new-threads-scheduler-fields)). To run it
-locally (about a minute on an Apple-silicon Mac):
+- `build` configures and builds the platform, Vulkan, launcher and tests
+  without a game profile.
+- `test` builds the host for a repository profile (Super Mario Bros. Wonder)
+  and runs 37 of the 38 CTest tests, then the Python tool tests
+  (`dm/tools/tests`). The runner has no GPU: the Vulkan tests use Mesa's
+  lavapipe and `NX_VK_ALLOW_CPU=1`, the buffer-texture test is skipped because
+  lavapipe crashes in its bindless path, and the launcher tests use SDL's dummy
+  video driver.
+- `package` builds two Fedora RPMs with `packaging/build_rpm.sh`, one for the
+  launcher and one with the profile's host, and uploads them.
+
+The local commands are the same ones CI runs:
 
 ```sh
-make -C dm/host/tests GAME=010015100B514000 -j8 asan tsan-threads
-make -C dm/gfx/tex/tests asan
+scripts/build_asahi.sh                         # platform, graphics and tests
+GAME=010015100B514000 scripts/build_asahi.sh   # the host and all tests
+python3 -m pytest dm/tools/tests -q
+packaging/build_rpm.sh [<title ID>]            # RPMs in dist/
 ```
 
-A new finding is fixed, not listed, unless its cause lies outside the code under
-test (an uninstrumented system framework, a test fixture); then it gets an entry
-with its reason. A fix removes any existing entry in the same change: the job
-then checks the repaired code. A change to `ignorelist.txt` rebuilds the ASan tests.
+A real game on Honeykrisp, the translator tests under `dm/gfx/tests`, the
+Python fuzz harnesses (`dm/tools/fuzz`), `profile_guess.py --check` and
+everything `regress.py` does stay local: they need an Apple GPU, a game or its
+files, or a run long enough not to belong on every pull request.
 
-A `coverage` job measures which lines the tests run, and reports only: no
-threshold fails it. It builds the host unit tests and the CPU texture test again
-with clang's source-based coverage (`make coverage`, into `build/cov` and `cov/`;
-`dm/sanitizers/coverage.mk`), and runs the tool tests (`dm/tools/tests`) under
-coverage.py over `dm/tools`, `dm/gfx/tools`, `dm/games` and `scripts`
-(configured in `pyproject.toml`, pinned in `.github/requirements/coverage.txt`).
-`dm/tools/coverage_report.py` turns the reports into the job summary: line
-coverage per area, the 15 largest files and, on a pull request, the changed lines
-the tests run and those they do not. The C areas list only the files a test
-compiles. The raw reports are the job's `coverage` artifact. Locally (about two
-minutes on an Apple-silicon Mac, most of it the tool tests):
+The Python lint and type checks are local too: with the pinned tools in a venv
+(`.github/requirements/lint.txt`), `dm/tools/lint_python.py` checks `scripts/`
+and the tools under `dm/` and keeps the baseline in
+`dm/tools/lint_python_baseline.tsv`. A new finding is fixed, or silenced on its
+line (`# noqa: <rule>`, `# pyright: ignore[<rule>]`) with a reason; only a
+raised tool version rewrites the baseline (`--rebaseline`).
 
-```sh
-make -C dm/host/tests GAME=010015100B514000 -j8 coverage
-make -C dm/gfx/tex/tests coverage
-python3 -m pip install -r .github/requirements/coverage.txt   # in a venv
-DM_GAME=010015100B514000 python3 -m coverage run -m unittest discover -s dm/tools/tests
-python3 -m coverage combine && python3 -m coverage json   # writes coverage.json
-python3 dm/tools/coverage_report.py --host dm/host/tests/build/cov/coverage.lcov \
-    --textures dm/gfx/tex/tests/cov/coverage.lcov --python coverage.json --base main
-```
-
-A separate iOS job uses XcodeGen and the production project template to compile
-`Launcher.swift`, link the complete app and stage synthetic resources. It uses
-tiny zero-filled embedded modules, needs no game files or keys, and neither
-signs nor installs the app. This checks build integration, not game execution.
-To reproduce it with Xcode and XcodeGen installed, choose a new scratch folder:
-
-```sh
-GAME=010015100B514000 python3 dm/ios/tools/build_smoke.py --output /path/to/scratch/ios-smoke
-```
-
-Generated projects and Xcode build products stay in that folder; the host profile
-header is generated under `dm/host/gen/` as usual. CI uploads failure logs.
-GPU regression tests still run locally with `make -C dm/gfx/tests GAME=<id> run`.
-
-`.github/workflows/lint-python.yml` lints `scripts/` and the Python tools under
-`dm/` with ruff (rules for bugs, never reformatting) and type-checks them with
-pyright in basic mode (`pyproject.toml`). It is a ratchet: today's findings are
-in `dm/tools/lint_python_baseline.tsv`, so it fails only on a new finding, or on
-a fixed one still listed there. Astral's ty, a faster type checker, can replace
-pyright once it is stable. With the pinned tools in a new venv:
-
-```sh
-python3 -m venv /path/to/lint-venv && /path/to/lint-venv/bin/pip install -r .github/requirements/lint.txt
-/path/to/lint-venv/bin/python3 dm/tools/lint_python.py            # the check CI runs
-/path/to/lint-venv/bin/python3 dm/tools/lint_python.py --update   # after fixing findings: shrink the baseline
-```
-
-The baseline never gains entries: fix a new finding, or silence it on its line
-(`# noqa: <rule>`, `# pyright: ignore[<rule>]`) with a reason. Only a raised tool
-version in `.github/requirements/lint.txt` rewrites it (`--rebaseline`). On pull
-requests, only the checker whose pinned release version increased may gain
-baseline entries or counts. Comments, dependency updates and checker downgrades
-do not allow growth.
-
-`scripts/bug_report.py` (`-h`) collects the logs, versions and settings a bug report needs into one zip ([CONTRIBUTING.md](../CONTRIBUTING.md#reporting-a-problem)); it reads an allow-list of text files only.
-For a Mac app, it reads the name, title ID and game version from `Info.plist`, lists the chain folders in `Contents/Resources/msl`, and includes both the player's and the bundle's `env.txt`. Recorded `DMCommit` and `DMChain` values take precedence; `dm/mac/pack_app.py` and `dm/ios/tools/build_ipa.sh` write them (the packing checkout's short hash, `+dirty` with uncommitted changes to tracked files, and the chain of the libraries the app carries), and the host logs them at start (`build: commit …, shader chain …, profile …`). An app without a commit stamp (packed before these keys) reports its commit as unknown. The collector's checkout and chain are labeled separately. An NSP build lists available chain folders under `shader/cache` (Mac), `shader/ios` (iOS) and `shader`; old cached folders do not identify the chain that ran. The 4 MB file limit and 20 MB bundle limit include `report.md` and truncation markers; space for the report is reserved before logs are collected. Explicit `.keys` inputs are refused.
-
-`scripts/clean_metal_cache.py` (`-h`, `--dry-run`) frees the internal disk of the build folders Metal's pipeline archive compiler leaves in `getconf DARWIN_USER_CACHE_DIR`/`com.apple.gpuarchiver`, up to about 127 MB for each archive flush of a Mac run, which a host from a build cannot remove itself, and in each built app's `org.nxnative.<title ID>/com.apple.gpuarchiver`, which the app removes at its next start ([Metal's build folders left by pipeline archive flushes](reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes)). It removes only folders idle for an hour and older than every running `dmhost`, and an app's only while no copy of it runs; `scripts/regress.py` runs it too.
-
-`.github/workflows/fuzz.yml` fuzzes the Python parsers of files a player
-supplies, nightly and by hand (never on pull requests): the RomFS image reader
-(`romfs.py`), the control data (`nacp.py`), the NSO loader, the shader
-containers of `shader_split.py` (BNSH, BAHS, MSHD, SARC / Yaz0, GLSLC, SDF,
-ARH1 and the others `scan_blob` recognizes) and the Unreal paks and shader
-archives of `uepak.py`. Each harness, `dm/tools/fuzz/fuzz_<parser>.py`, builds
-its seeds in code and mutates them for 60 s; nothing comes from a game. A
-finding is an exception other than the parser's declared rejection (each
-harness's docstring says which), a hang or an oversized allocation. Its input
-goes into `dm/tools/fuzz/corpus/<parser>/`, and `dm/tools/tests/test_fuzz_corpus.py`
-replays the corpus with the tool tests on every pull request; an open finding
-has a row in `dm/tools/fuzz/known.tsv` (its signature, its issue) and replays as
-an expected failure until the parser is fixed, when the row comes out. Locally,
-`python3 dm/tools/fuzz/fuzz_romfs.py --time 300` runs a harness: with atheris
-(`.github/requirements/fuzz.txt`) coverage-guided, without it on a blind random
-engine. atheris has no macOS wheel; it builds from source with an LLVM that
-ships libFuzzer (Apple's Clang does not):
-
-```sh
-python3 -m venv /path/to/fuzz-venv && /path/to/fuzz-venv/bin/pip install lz4
-SDKROOT=$(xcrun --show-sdk-path) CLANG_BIN=/path/to/llvm/bin/clang CC=/path/to/llvm/bin/clang CXX=/path/to/llvm/bin/clang++ \
-  /path/to/fuzz-venv/bin/pip install 'git+https://github.com/google/atheris@e36da74cf42b5834c4e31d7cabb58d796695d29f'   # 3.1.0 (Python 3.14 support) has no source release on PyPI
-/path/to/fuzz-venv/bin/python dm/tools/fuzz/fuzz_shader_split.py --time 300 --findings /path/to/scratch/findings
-```
-
-`.github/workflows/lint-c.yml` checks the C and Objective-C of `dm/host` and
-`dm/gfx` on a Mac (the sources need the macOS SDK), in about five minutes. It
-builds a compile database from dry runs of the Makefiles, then runs clang-tidy
-with the bug-finding checks of `.clang-tidy` and clang's static analyzer. That
-is a ratchet like the Python one: `dm/tools/lint_c_baseline.tsv` counts the
-findings per file and check (no line numbers, so moving code changes nothing),
-and the job fails when a file has more findings of a check than listed, when it
-has fewer (a fixed finding still listed), and when a pull request's baseline
-grew over its base's. So the baseline only shrinks: a new finding is fixed, or,
-when it is a false positive, silenced on its line with `// NOLINT(<check>)` and
-a reason. Apple's toolchain has no clang-tidy: use the LLVM release CI
-downloads (`LLVM_VERSION` in the workflow, from
-github.com/llvm/llvm-project/releases, or Homebrew's `llvm@23` at that
-version), since another version finds other things:
-
-```sh
-export LLVM=/path/to/LLVM-23.1.4-macOS-ARM64   # the unpacked release (bin/clang-tidy); else Homebrew's llvm@23
-python3 dm/tools/lint_c.py compdb              # dm/host/gen/compile_commands.json (GAME= picks the profile header)
-python3 dm/tools/lint_c.py tidy -j 8           # the check CI runs; FILE... checks only those sources
-python3 dm/tools/lint_c.py tidy --update       # after fixing findings: lowers the counts, never adds one
-```
-
-A file's count comes from every source that includes it: most graphics tests
-include `nvn_mtl.m`, so a finding listed under it may come from a test's
-analysis (run clang-tidy on the test to see the path), and a change anywhere in
-it can move the analyzer onto other paths. An object the host keeps in one of
-its C hash maps (`hm_put_id`: the serial table, the pending pipeline bases) is
-handed to the map for the analyzer's eyes (a `CF_CONSUMED` declaration under
-`__clang_analyzer__` in `nvn_mtl.m`), so code that leaves an object there needs
-no `NOLINT` for a leak.
-
-Raising `LLVM_VERSION` takes a new baseline in the same change
-(`tidy --rebaseline`; `dm/tools/tests/test_lint_c.py` checks that the two name
-the same release).
+`scripts/bug_report.py` (`-h`) collects the logs, versions and settings a bug report needs into one zip ([CONTRIBUTING.md](../CONTRIBUTING.md#reporting-a-problem)); it reads an allow-list of text files only and refuses `.keys` inputs.
 
 ### Triage report
 

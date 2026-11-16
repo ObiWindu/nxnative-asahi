@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Python lint and type check with a ratchet (.github/workflows/lint-python.yml): ruff (pyproject.toml's [tool.ruff]: lint rules for bugs, no formatting) and pyright in basic
+# Python lint and type check with a ratchet for a local check (CI does not run it): ruff (pyproject.toml's [tool.ruff]: lint rules for bugs, no formatting) and pyright in basic
 # mode ([tool.pyright]) over scripts/ and the tools under dm/. The findings the code had when the check came in are listed in dm/tools/lint_python_baseline.tsv, keyed by tool,
 # file, rule and message with a count (no line numbers: they survive edits elsewhere in the file). The check fails on a finding beyond its key's count (a new one) and on a
 # count above what the code has now (a fixed finding still listed: run --update). So the baseline only shrinks:
 #   --update      lowers counts to what the code has now and drops fixed entries; it never adds one (a new finding is fixed, or silenced on its line with a noqa or
 #                 `# pyright: ignore[<rule>]` and a reason)
 #   --rebaseline  writes every current finding: only with a raised tool version in .github/requirements/lint.txt, whose findings change with it
-#   --against REV fails when the baseline has an entry or a count that REV's has not, unless that checker's pinned version increased (CI uses the PR's base)
-# Run it with the pinned tools, so the findings match CI's (other versions or other packages in the environment change them):
+#   --against REV fails when the baseline has an entry or a count that REV's has not, unless that checker's pinned version increased
+# Run it with the pinned tools, so the findings match the baseline's (other versions or other packages in the environment change them):
 #   python3 -m venv <dir> && <dir>/bin/pip install -r .github/requirements/lint.txt && <dir>/bin/python3 dm/tools/lint_python.py [--update]
 # Under GitHub Actions, new findings are annotated on their lines and a summary goes to $GITHUB_STEP_SUMMARY.
 import argparse, collections, json, os, re, subprocess, sys, pathlib

@@ -7,14 +7,14 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 game=${1:-}
 out=${RPM_OUT:-"$root/dist"}
-top=$(mktemp -d /tmp/opencode/nxnative-rpm.XXXXXX)
+top=$(mktemp -d "${TMPDIR:-/tmp}/nxnative-rpm.XXXXXX")
 trap 'rm -rf "$top"' EXIT
 mkdir -p "$top"/{SOURCES,SPECS,BUILD,RPMS,SRPMS} "$out"
 name=nxnative-asahi-0.1.0
 tar -cf "$top/SOURCES/$name.tar" -C "$root" \
   --transform "s,^\.,$name," \
   --exclude=.git --exclude=build --exclude=build-asahi --exclude='build-asahi-*' \
-  --exclude='docs/images' --exclude='dm/games' --exclude='*.o' --exclude='__pycache__' .
+  --exclude=dist --exclude='docs/images' --exclude='dm/games' --exclude='*.o' --exclude='__pycache__' .
 if [ -n "$game" ]; then
   [ -f "$root/dm/games/$game/game.tsv" ] || { echo "no profile dm/games/$game" >&2; exit 2; }
   tar -rf "$top/SOURCES/$name.tar" -C "$root" --transform "s,^,$name/," "dm/games/game.py" "dm/games/$game"

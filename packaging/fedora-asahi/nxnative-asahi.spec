@@ -5,16 +5,17 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Native Nintendo Switch runtime for Asahi Linux
 License:        MIT
-URL:            https://github.com/seedds/nxnative
+URL:            https://github.com/ObiWindu/nxnative-asahi
 Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  cmake
 BuildRequires:  ninja-build
 BuildRequires:  gcc
+BuildRequires:  python3
 BuildRequires:  vulkan-loader-devel
 BuildRequires:  vulkan-headers
 Requires:       vulkan-loader
 Requires:       mesa-vulkan-drivers
-Requires:       sdl3
+Requires:       SDL3
 %description
 nxnative-asahi runs a Nintendo Switch game's own AArch64 code on Apple Silicon
 under Asahi Linux. It answers Horizon's kernel SVCs and services and renders

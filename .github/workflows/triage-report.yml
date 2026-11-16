@@ -20,7 +20,7 @@ defaults:
   run:
     shell: bash
 
-# Actions are pinned to commit SHAs (the tag in the comment), as in tests.yml.
+# Actions are pinned to commit SHAs (the tag in the comment), as in ci.yml.
 jobs:
   report:
     name: Triage report

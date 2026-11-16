@@ -92,7 +92,7 @@ error.
 
 - host/guest geometry;
 - a 64 KiB range and its permission table;
-- a mixed 16 KiB page is reported as approximate;
+- a mixed 16 KiB page is reported as approximate (on a 4 KiB host page the same protection is exact);
 - a `PROT_NONE` host page faults, its neighbour still writes;
 - two memfd aliases share writes;
 - a dirty-tracked host page faults, unprotects, and marks all four guest pages;

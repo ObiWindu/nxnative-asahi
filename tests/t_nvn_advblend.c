@@ -1,7 +1,8 @@
 // NVN -> Vulkan advanced-blend test: the Porter-Duff modes that fixed-function
 // factors can express (blend_st.adv) must override the state's blend functions.
 // A full-screen triangle writes the case's source colour over the case's clear
-// colour; the expected centre is the exact fixed-function result.
+// colour; the expected centre is the fixed-function result. A driver rounds a
+// blend result to its own precision, so each channel allows one step.
 // The shaders are compiled with the system's shaderc at test time and written
 // under the keys the zeroed control sections hash to.
 #include "dm.h"
@@ -169,8 +170,14 @@ int main(void) {
         NVNcopyRegion all = {0, 0, 0, 64, 64, 1};
         mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
         const uint8_t *mid = px + (32 * 64 + 32) * 4;
-        int ok = mid[0] == cases[c].r && mid[1] == cases[c].g && mid[2] == cases[c].b && mid[3] == cases[c].a;
-        CHECK(ok, "%s gives %u %u %u %u (expected %u %u %u %u)", cases[c].name, mid[0], mid[1], mid[2], mid[3],
+        const uint8_t got[4] = {mid[0], mid[1], mid[2], mid[3]};
+        const uint8_t want[4] = {cases[c].r, cases[c].g, cases[c].b, cases[c].a};
+        int ok = 1;
+        for (int i = 0; i < 4; i++) {
+            int d = got[i] > want[i] ? got[i] - want[i] : want[i] - got[i];
+            ok = ok && d <= 1;
+        }
+        CHECK(ok, "%s gives %u %u %u %u (expected %u %u %u %u, each within 1)", cases[c].name, mid[0], mid[1], mid[2], mid[3],
               cases[c].r, cases[c].g, cases[c].b, cases[c].a);
     }
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN ADVANCED BLEND TEST FAILED" : "NVN ADVANCED BLEND TEST PASSED", g_fail, g_fail == 1 ? "" : "s");

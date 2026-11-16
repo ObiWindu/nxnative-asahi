@@ -4,7 +4,6 @@ import contextlib
 import io
 import json
 from pathlib import Path
-import re
 import sys
 import tempfile
 import unittest
@@ -171,16 +170,6 @@ class Against(unittest.TestCase):
 
     def test_no_baseline_at_base(self):
         self.assertEqual(self.run_against({HID: 9}, None)[0], 0)
-
-
-class Toolchain(unittest.TestCase):
-    def test_ci_downloads_the_llvm_the_baseline_was_made_with(self):
-        wf = (REPO / '.github/workflows/lint-c.yml').read_text()
-        m = re.search(r'^\s+LLVM_VERSION: (\d+\.\d+\.\d+)$', wf, re.M)
-        if m is None: self.fail('lint-c.yml: no LLVM_VERSION')
-        self.assertRegex(wf, r'(?m)^\s+LLVM_SHA256: [0-9a-f]{64}$')
-        self.assertEqual(lint.baseline_llvm(lint.BASELINE.read_text()), m.group(1),
-                         'dm/tools/lint_c_baseline.tsv was made with another LLVM than lint-c.yml downloads: run lint_c.py tidy --update with that release')
 
 
 if __name__ == '__main__':
