@@ -6,6 +6,7 @@ import shutil
 import shlex
 import struct
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -25,8 +26,12 @@ class Images(unittest.TestCase):
         root = Path(cls.tools.name)
         source = root / 'validate.c'
         source.write_text('#include "romfs_image.h"\nint main(int argc, char **argv) {\n'
-                          'if (argc != 2) return 2; romfs_img *m = romfs_image_open(argv[1]);\n'
-                          'if (!m) return 1; romfs_image_close(m); return 0; }\n')
+                          '    if (argc != 2) return 2;\n'
+                          '    romfs_img *m = romfs_image_open(argv[1]);\n'
+                          '    if (!m) return 1;\n'
+                          '    romfs_image_close(m);\n'
+                          '    return 0;\n'
+                          '}\n')
         cls.validator = root / 'validate'
         subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(REPO / 'dm/host'),
                         str(source), '-o', str(cls.validator)], check=True)
@@ -126,6 +131,7 @@ class Images(unittest.TestCase):
         self.assertEqual(self.dst.read_bytes(), original)
         self.assertFalse(Path(str(self.dst) + '.part').exists())
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'iOS device transfer helper')
     def test_push_helper_refreshes_cache_and_propagates_copy_failure(self):
         resources = self.root / 'resources.env'
         resources.write_text('DM_RESOURCE_ROMFS=' + shlex.quote(str(self.src)) + '\n')
@@ -244,6 +250,7 @@ else: sys.exit(f'fake afcclient: no command {cmd}')
 '''
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'iOS device transfer')
 class DlcTransfers(unittest.TestCase):
     """The DLC set replaces Documents/aoc over AFC, and nothing else in the app's data container: devicectl's --remove-existing-content empties the whole
     container (CoreDevice 651.32, docs/reference/packing.md), saves included, so the script never passes it."""
@@ -337,6 +344,7 @@ class DlcTransfers(unittest.TestCase):
         self.assertNotIn('--remove-existing-content', self.xcrun_calls.read_text())
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'iOS device transfer')
 class AfcTransfers(unittest.TestCase):
     """The image goes over AFC (afcclient), which streams it, where devicectl copies the whole file through CoreDeviceService's memory."""
 

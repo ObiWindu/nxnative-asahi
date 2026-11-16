@@ -321,6 +321,7 @@ class IoStore(unittest.TestCase):
         img = bytes(0x1000) + os.urandom(64) + k + os.urandom(64)   # main: the key in its read-only data, after a text of 0x1000 bytes
         return str(p0), str(p1), toc, raw, (img, 0x1000, len(img))
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'CommonCrypto fixture')
     def test_an_encrypted_index_is_read_with_mains_key(self):
         p0, p1, _, _, img = self.sparking_zero()
         self.assertTrue(uepak.inline_shaders(p0, self.KEY))
@@ -331,6 +332,7 @@ class IoStore(unittest.TestCase):
             self.assertEqual(uepak.unreal_paks(str(self.romfs), inline=False, mains=['main']), [])   # no decode step
             self.assertEqual(len(uepak.unreal_paks(str(self.romfs), mains=['main'])), 2)
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'CommonCrypto fixture')
     def test_split_reads_an_encrypted_container_with_the_key_of_the_pak_beside_it(self):
         p0, _, toc, raw, img = self.sparking_zero()
         with patch.object(uepak, 'nso_image', return_value=img), patch.object(uepak, 'Pak') as pk:

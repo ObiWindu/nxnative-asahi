@@ -75,8 +75,6 @@ class Labels(unittest.TestCase):
         self.assertEqual(self.names('patch_nso: a jump table'), {'rewriter'})
         self.assertEqual(self.names('shader_split.py stops'), {'packing', 'tools'})
         self.assertEqual(self.names('feat(mac): local players'), {'mac', 'enhancement'})
-        self.assertEqual(self.names('[iOS] Cloud Saves'), {'ios'})
-        self.assertEqual(self.names('Support in PokemonZA在iPhoneAir；'), {'ios'})
         self.assertEqual(self.names('SIGSEGV in h_nvnBufferGetAddress'), {'nvn'})
         self.assertEqual(self.names('Vulkan on the Mac host'), {'vulkan', 'mac', 'host'})
         self.assertEqual(self.names('DMSH_CHAIN after an update'), {'shader chain'})
@@ -88,8 +86,7 @@ class Labels(unittest.TestCase):
 
     def test_form_platform(self):
         form = '### How it was built and run\n\n%s\n\n### Device and OS\n\nMacBook Pro'
-        self.assertEqual(self.names('Black screen', form % 'Mac app (--platform mac-app)'), {'mac'})
-        self.assertEqual(self.names('Black screen', form % 'iPhone or iPad, unsigned IPA from build_ipa_from_nsp.py'), {'ios'})
+        self.assertEqual(self.names('Black screen', form % 'Asahi Linux runtime'), set())
         self.assertEqual(self.names('Black screen', form % 'The NSP script failed before anything ran'), set())
 
     def test_kind_from_the_form(self):

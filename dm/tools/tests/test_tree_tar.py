@@ -106,6 +106,7 @@ class PackQuiet(unittest.TestCase):
         time.sleep(0.05)
         return tree_tar.pack_quiet(self.w, self.lines.append, days=0.0000001, **k)
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS xattr')
     def test_packs_a_quiet_folder_and_keeps_its_attributes(self):
         d = self.folder('issue1')
         subprocess.run(['xattr', '-w', 'org.d2rmobile.guest-name', 'Foo.txt', d / 'sub/f0'], check=True)

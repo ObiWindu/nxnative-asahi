@@ -140,9 +140,15 @@ static int release_page(range_t *r, uintptr_t p, _Atomic uint64_t *count) {
 }
 // The kernel's protection of the host page at a now: writable (and not executable). One vm_region call, made only for a fault no range claimed
 static int page_writable(uintptr_t a) {
+#ifdef __APPLE__
     vm_address_t pg = a & ~(g_pg - 1), va = pg; vm_size_t vs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
     if (vm_region_64(mach_task_self(), &va, &vs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || va > pg) return 0;
     return (bi.protection & (VM_PROT_WRITE | VM_PROT_EXECUTE)) == VM_PROT_WRITE;
+#else
+    int prot = 0, shared = 0;
+    if (nx_range_prot(a, &prot, &shared)) return 0;
+    return (prot & (PROT_WRITE | PROT_EXEC)) == PROT_WRITE;
+#endif
 }
 // A write that faulted on a protected page may be handled only after a pool over it was retired: nvn_dirty_remove_range makes the pages writable, then drops the range, and the
 // scan then found no range to claim the fault, so the crash handler stopped the host on a write that was the tracker's (t_dirty_reuse). So a fault no range claims is re-executed
@@ -266,10 +272,10 @@ static uint64_t page_hash(const void *page) {   // xxHash64's rounds over a page
     const uint64_t P1 = 0x9E3779B185EBCA87ull, P2 = 0xC2B2AE3D27D4EB4Full, *w = page;
     uint64_t a = P1 + P2, b = P2, c = 0, d = -P1;
     for (size_t i = 0, n = g_pg / 8; i < n; i += 4) {
-        a = __builtin_rotateleft64(a + w[i] * P2, 31) * P1; b = __builtin_rotateleft64(b + w[i + 1] * P2, 31) * P1;
-        c = __builtin_rotateleft64(c + w[i + 2] * P2, 31) * P1; d = __builtin_rotateleft64(d + w[i + 3] * P2, 31) * P1;
+        a = nx_rotl64(a + w[i] * P2, 31) * P1; b = nx_rotl64(b + w[i + 1] * P2, 31) * P1;
+        c = nx_rotl64(c + w[i + 2] * P2, 31) * P1; d = nx_rotl64(d + w[i + 3] * P2, 31) * P1;
     }
-    uint64_t h = __builtin_rotateleft64(a, 1) + __builtin_rotateleft64(b, 7) + __builtin_rotateleft64(c, 12) + __builtin_rotateleft64(d, 18);
+    uint64_t h = nx_rotl64(a, 1) + nx_rotl64(b, 7) + nx_rotl64(c, 12) + nx_rotl64(d, 18);
     h ^= h >> 33; h *= P2; h ^= h >> 29; h *= P1; return h ^ (h >> 32);
 }
 static void open_add(range_t *r, uintptr_t p, uint64_t h) {
@@ -420,6 +426,7 @@ void nvn_dirty_describe(const void *addr, const void *span, char *out, size_t n)
         if (w > 0) o += (size_t)w;
     }
     if (!found && o < n) { int w = snprintf(out + o, n - o, "no live range"); if (w > 0) o += (size_t)w; }
+#ifdef __APPLE__
     vm_address_t va = a & ~(g_pg - 1); vm_size_t vs = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
     kern_return_t kr = vm_region_64(mach_task_self(), &va, &vs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj);
     if (o < n) {
@@ -427,6 +434,13 @@ void nvn_dirty_describe(const void *addr, const void *span, char *out, size_t n)
         else snprintf(out + o, n - o, "; kernel: %s%s%s%s", bi.protection & VM_PROT_READ ? "r" : "-", bi.protection & VM_PROT_WRITE ? "w" : "-", bi.shared ? " shared" : "",
                       bi.reserved ? " reserved" : "");
     }
+#else
+    int prot = 0, shared = 0;
+    if (o < n) {
+        if (nx_range_prot(a, &prot, &shared)) snprintf(out + o, n - o, "; kernel: not mapped");
+        else snprintf(out + o, n - o, "; kernel: %s%s%s%s", prot & PROT_READ ? "r" : "-", prot & PROT_WRITE ? "w" : "-", prot & PROT_EXEC ? "x" : "-", shared ? " shared" : "");
+    }
+#endif
 }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;

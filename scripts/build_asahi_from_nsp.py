@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""Prepare a Nintendo Switch game for the native Asahi Linux host.
+
+    python3 scripts/build_asahi_from_nsp.py <NSP folder> -k prod.keys [options]
+
+The Asahi path in one pass: identify the game, extract its NSPs (or read a
+.nup container / dump folder), rewrite the code modules with patch_nso.py,
+split the shaders and build their SPIR-V with the Linux-native translator and
+SPIRV-Cross, then build the per-profile Asahi host and print the launch command.
+
+There is no Xcode, IPA, Metal compiler or iPhone stage. The extracted files,
+the rewritten modules and the shader cache stay in <source>/<id>_build/.
+"""
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import types
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / 'scripts'))
+sys.path.insert(0, str(REPO / 'dm/tools'))
+import build_ipa_from_nsp as nsp   # the extraction, rewrite, profile and split stages, shared with the upstream packer
+import nacp   # control data, used by the shared profile derivation
+import romfs as rfs
+nsp.nacp = nacp
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def fail(msg):
+    raise SystemExit(f'[RED] {msg}')
+
+
+def command(args):
+    log('$ ' + ' '.join(str(a) for a in args))
+
+
+def run(args, **kw):
+    command(args)
+    subprocess.run([str(a) for a in args], check=True, **kw)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('nsp_dir', help='an NSP folder, a .nup file (or the folder holding it), or a dump folder (base/, updates/, dlc/)')
+    ap.add_argument('-k', '--keys', help='path to prod.keys (an NSP build; not needed for a .nup or a dump)')
+    ap.add_argument('-p', '--package', help='version to prepare (default: the newest in the folder)')
+    ap.add_argument('--title-id', help='the game to pick when the folder holds several')
+    ap.add_argument('--work-dir', help='build folder (default: <title id>_build beside the NSP folder)')
+    ap.add_argument('--skip-shaders', action='store_true', help='do not build the shader cache')
+    ap.add_argument('--skip-host', action='store_true', help='do not build the Asahi runtime')
+    ap.add_argument('--allow-damaged', action='store_true', help='pack files a NUP/dump/hash check reports damaged, instead of stopping')
+    ap.add_argument('--jobs', type=int, default=os.cpu_count() or 8, help='compile and shader workers')
+    a = ap.parse_args(argv)
+
+    nsp.PROG.mode = nsp.progress_mode('lines')
+    nsp.ALLOW_DAMAGED = a.allow_damaged
+    here = Path(__file__).resolve()
+    repo = nsp.find_repo(here)
+    if sys.version_info < (3, 12):
+        fail('Python 3.12 or newer is required')
+    nsp.check_native_python()
+    for m in ('lz4.block', 'capstone'):
+        if not nsp._importable(m):
+            fail(f'the current Python is missing the {m} module (pip install lz4 capstone)')
+
+    src_path = Path(os.path.expanduser(a.nsp_dir)).resolve()
+    nsp_dir = src_path.parent if src_path.is_file() else src_path
+    if not nsp_dir.is_dir():
+        fail(f'not a folder or a file: {src_path}')
+    nup = nsp.nup_file(src_path)
+    dump = None if nup else nsp.dump_folder(nsp_dir)
+    if src_path.is_file() and not nup:
+        fail(f'not a NUP file: {src_path}')
+    if nup and nsp.pack_nup.zstd is None:
+        fail('reading a NUP needs the zstandard module (Python 3.14 has compression.zstd; older Pythons: pip install zstandard)')
+    keys = None
+    if not nup and not dump:
+        keys = Path(os.path.expanduser(a.keys or nsp.PROD_KEYS)).resolve() if (a.keys or nsp.PROD_KEYS) else None
+        if not keys or not keys.is_file():
+            fail('prod.keys is required for an NSP build: pass -k <prod.keys>')
+
+    env = nsp.tool_env()
+    env.setdefault('J', str(a.jobs))
+    env.setdefault('USER', os.environ.get('USER', 'player'))
+    py = sys.executable
+    env.setdefault('PYTHONUNBUFFERED', '1')
+
+    want = int(a.title_id, 16) if a.title_id else None
+    if nup:
+        app, fam = nsp.scan_nup(nup, want)
+        log(f'a NUP: {nup.name}')
+    elif dump:
+        app, fam = nsp.scan_dump(nsp_dir, want)
+        log(f'a dump folder: {nsp_dir}')
+    else:
+        with nsp.package_reader(repo, keys, env) as packages:
+            app, fam = nsp.scan_nsps(nsp_dir, packages.contents, want)
+            packages.check_keys(fam)
+        fam = nsp.decompress_nsz(nsp_dir, app, fam, keys, env, a.work_dir)
+    log(f'game {app:016X}: {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC' + (' (no keys needed)' if nup or dump else ''))
+
+    work = Path(os.path.expanduser(a.work_dir)).resolve() if a.work_dir else nsp_dir / f'{app:016X}_build'
+    work.mkdir(parents=True, exist_ok=True)
+    logs = work / 'logs'; logs.mkdir(exist_ok=True)
+    tmp = work / 'tmp'; tmp.mkdir(exist_ok=True)
+
+    # Profile: a registered one, or a provisional one surveyed from the files.
+    sys.path.insert(0, str(repo / 'dm/games'))
+    import game as gamemod
+    import profile_guess as pg
+    nsp.pg = pg
+    own = nsp.own_profile_folders(types.SimpleNamespace(work_dir=a.work_dir, profile_out=''), nsp_dir, app)
+    g = gamemod.by_title(app, own)
+    provisional = False
+    if g is None:
+        pdir = work / 'profile'
+        gdir = pdir / f'{app:016X}'
+        if not (gdir / 'game.tsv').is_file():
+            log('no game profile: surveying the game files')
+            facts = nsp.survey(nsp_dir, app, fam, keys, repo, py, env)
+            facts['survey'] = str(nsp_dir / f'{app:016X}_survey' / 'survey.md')
+            nsp.write_profile(gdir, app, facts)
+        os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = str(pdir)
+        os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
+        g, provisional = gamemod.load(f'{app:016X}'), True
+        log(f'[RED] provisional game profile: {g.dir}; the game may not boot until its profile is corrected')
+    else:
+        log(f'game profile: {g.id} ({g.get("name", "")})')
+
+    have = nsp.nsp_versions(fam)
+    builds = g.builds()
+    need = g.words('shader_versions')
+    pkg_ver = a.package or (g.get('package') if g.get('package') in have else None) or max(have, key=nsp.vnum)
+    if pkg_ver not in have:
+        fail(f'version {pkg_ver} is not in the folder, which holds {", ".join(sorted(have, key=nsp.vnum))}')
+    derived = None
+    if pkg_ver not in builds:
+        derived = f'{pkg_ver} is not a build the profile registers'
+    elif not all(v in have for v in need):
+        derived = 'the folder lacks ' + ', '.join(v for v in need if v not in have)
+    versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
+    picks = nsp.pick_nsps(fam, have, versions)
+    log(f'preparing {pkg_ver}' + (f' ({derived}; a derived profile)' if derived else ''))
+
+    ex = work / 'extract'; ex.mkdir(exist_ok=True)
+    nx = None if (nup or dump) else nsp.find_nx_extract(repo, env)
+    dirs = {}
+    for ver in versions:
+        b, u = picks[ver]
+        if nup:
+            dirs[ver] = nsp.extract_nup(ex, ver, u or b, b, app, fam['nup'])
+        elif dump:
+            dirs[ver] = nsp.extract_dump(ex, ver, u or b, app)
+        else:
+            dirs[ver] = nsp.extract(nx, keys, ex, ver, b, u, logs, app, repo)
+    nsp.check_formats(dirs)
+    if not derived:
+        bad = [f'{v}: {x}' for v in versions for x in nsp.build_mismatch(dirs[v], v, g)]
+        if bad:
+            derived = f'not the builds the profile registers: {"; ".join(bad)}'
+            versions = [pkg_ver]
+            log(derived)
+    if derived:
+        pdir = work / 'profile'
+        disp = nsp.derive_profile(g, pdir / g.id, pkg_ver, dirs[pkg_ver], g.words('modules'), app)
+        os.environ['DM_GAMES_DIR'] = env['DM_GAMES_DIR'] = str(pdir)
+        os.environ['DM_GAMES_FIRST'] = env['DM_GAMES_FIRST'] = '1'
+        g = gamemod.load(g.id)
+        log(f'derived profile for {pkg_ver} ({disp}): {g.dir}')
+
+    game = dirs[pkg_ver]
+    src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
+    gfx = src['graphics'][0]
+    if gfx != 'nvn':
+        fail(f'this is a {gfx} title; the Asahi preparation path currently builds NVN shader packages only')
+    for on, key in ((src['glslc_capture'][0], 'glslc'), (src['vk_capture'][0], 'vulkan capture'),
+                    (src['gl_capture'][0], 'OpenGL capture'), (src['ue_decode'][0], 'Unreal shader decode'),
+                    (src['oodle_packs'][0], 'Oodle shader packs'), (src['ue_legacy'][0], 'legacy Unreal shaders')):
+        if on:
+            fail(f'{key} needs the host capture/decode path, which is not wired into the Asahi preparation script yet')
+
+    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(tmp))
+    aoc = nsp.extract_aoc(nx, keys, repo, work, app, fam, logs)
+    dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
+    patched = work / f'patched_{pkg_ver}'
+    g = nsp.rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    nsp.chain_header(py, repo, env, logs)
+
+    sh = work / 'shader'
+    if not a.skip_shaders:
+        pkey = nsp.split_shaders(py, repo, [rfs.source(dirs[v]) for v in versions],
+                                 [dirs[v] / 'ExeFS/main' for v in versions], sh / 'pkg', env, logs, g,
+                                 provisional, None, dlc_roms)
+        xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
+        cache = nsp.build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac=True)
+        libs = cache / f'b-{nsp.chain_of(repo)}'
+        log(f'shader cache: {libs}')
+    else:
+        libs = sh / 'cache' / f'b-{nsp.chain_of(repo)}'
+    # The Asahi host reads a shader directory, not the packed .img file (the
+    # one-file reader is a later optimization). Expand the library for it.
+    libdir = work / 'shaders' / f'b-{nsp.chain_of(repo)}'
+    if nsp.shader_lib.exists(libs):
+        libdir.mkdir(parents=True, exist_ok=True)
+        view = nsp.shader_lib.view(libs)
+        for p in view.iterdir():
+            if p.is_file():
+                (libdir / p.name).write_bytes(p.read_bytes())
+        log(f'host shader directory: {libdir}')
+
+    host_dir = work / 'host-asahi'
+    if not a.skip_host:
+        run(['cmake', '-S', str(repo), '-B', str(host_dir), '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
+             '-DNXNATIVE_BUILD_HOST=ON', '-DNXNATIVE_BUILD_TESTS=OFF', f'-DNXNATIVE_GAME={g.id}'])
+        run(['cmake', '--build', str(host_dir), '-j', str(a.jobs)])
+        host = host_dir / 'nxnative-asahi'
+    else:
+        host = Path('<host>/nxnative-asahi')
+
+    save = work / 'run' / 'save'; save.mkdir(parents=True, exist_ok=True)
+    temp = work / 'run' / 'tmp'; temp.mkdir(parents=True, exist_ok=True)
+
+    # A launcher-ready folder: game.tsv, romfs, the rewritten modules, the shader
+    # folder and save/temp. Set NXNATIVE_GAMES_DIR to the build folder and the
+    # launcher lists this game.
+    game_dir = work / 'game'
+    game_dir.mkdir(exist_ok=True)
+    shutil.copyfile(g.dir / 'game.tsv', game_dir / 'game.tsv')
+    for name in ('romfs',):
+        dst = game_dir / name
+        if dst.exists() or dst.is_symlink(): dst.unlink()
+        os.symlink(os.path.abspath(rfs.source(game)), dst, target_is_directory=True)
+    for p in patched.iterdir():
+        if p.is_file() and (p.name.endswith('.patched.bin') or p.name.endswith('.fixups.tsv')):
+            dst = game_dir / p.name
+            if dst.exists() or dst.is_symlink(): dst.unlink()
+            os.symlink(p.resolve(), dst)
+    gl = game_dir / 'shaders'; gl.mkdir(exist_ok=True)
+    link = gl / f'b-{nsp.chain_of(repo)}'
+    if link.exists() or link.is_symlink(): link.unlink()
+    if libdir.is_dir(): os.symlink(libdir.resolve(), link, target_is_directory=True)
+    al = game_dir / 'aoc'
+    if al.exists() or al.is_symlink(): al.unlink()
+    if aoc:
+        os.symlink(aoc.resolve(), al, target_is_directory=True)
+    with open(game_dir / 'nxnative.env', 'w') as f:
+        if aoc: f.write(f'DM_AOC_DIR={al}\n')
+    (game_dir / 'save').mkdir(exist_ok=True)
+    (game_dir / 'temp').mkdir(exist_ok=True)
+
+    cmd = [str(host), 'run', str(patched), 'main']
+    runenv = {'DM_ROMFS': str(rfs.source(game)), 'DM_SAVE': str(save), 'DM_TEMP': str(temp),
+              'NX_NVN_SHADER_CACHE': str(libdir)}
+    if aoc: runenv['DM_AOC_DIR'] = str(aoc)
+    shell = ['#!/bin/sh', '# generated by scripts/build_asahi_from_nsp.py']
+    for k, v in runenv.items():
+        shell.append(f'{k}={shlex_quote(v)}')
+    shell.append(f'exec {shlex_quote(str(host))} run {shlex_quote(str(patched))} main "$@"')
+    runsh = work / 'run.sh'
+    runsh.write_text('\n'.join(shell) + '\n')
+    runsh.chmod(0o755)
+
+    rt = work / 'runtimes'; rt.mkdir(exist_ok=True)
+    rlink = rt / 'nxnative-asahi'
+    if not a.skip_host:
+        if rlink.exists() or rlink.is_symlink(): rlink.unlink()
+        os.symlink(host.resolve(), rlink)
+    launcher = repo / 'build' / 'nxnative-launcher'
+    if not launcher.is_file(): launcher = repo / 'build-asahi' / 'nxnative-launcher'
+
+    log('')
+    log('done. run the game with:')
+    log(f'  {runsh}')
+    log('or:')
+    log('  ' + ' '.join(f'{k}={v}' for k, v in runenv.items()) + ' ' + ' '.join(cmd))
+    log('')
+    log('in the graphical launcher:')
+    log(f'  NXNATIVE_GAMES_DIR={work} NXNATIVE_RUNTIME_DIR={rt} {launcher}')
+    log(f'extracted files: {game}')
+    return 0
+
+
+def shlex_quote(s):
+    import shlex
+    return shlex.quote(str(s))
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except nsp.BuildError as e:
+        sys.exit(f'[RED] {e}')

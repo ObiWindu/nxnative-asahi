@@ -20,7 +20,6 @@ WORDS = {   # area → words in the title (regular expression, any case)
     'textures': r'\b(BC[1-7]|ASTC|texture (layout|format)s?)\b',
     'rewriter': r'\b(patch_nso|sdk_patches|nso_\w+|rewriter)\b',
     'packing': r'\b(shader[ _]split|shader extraction|nx_extract|build_ipa\w*|pack_app|NSP script)\b',
-    'ios': r'\b(iOS|iPadOS|iPhone\w*|iPad|IPA)\b',
     'mac': r'\b(Mac|macOS|MacBook)\b',
     'tools': r'\b(dm/tools|scripts/|\w+\.py\b)',
     'docs': r'\b(\w+\.md|docs?|documentation)\b',
@@ -89,7 +88,7 @@ def labels(title, body, root):
     built = field(body, 'How it was built and run')
     out, names = {}, pr_areas.game_names(root)
     for area, rx in WORDS.items():
-        if re.search(rx, title, re.I | re.A) or (area in ('ios', 'mac') and re.search(rx, built, re.I | re.A)):
+        if re.search(rx, title, re.I | re.A) or (area == 'mac' and re.search(rx, built, re.I | re.A)):
             out[area] = AREA_LABELS[area]
     if name := kind(title, body): out[name] = KIND_LABELS[name]
     for gid in sorted(games(title, body, names)):

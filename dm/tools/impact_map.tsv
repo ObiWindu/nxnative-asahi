@@ -14,7 +14,6 @@ dm/gfx/tests/*	-	graphics tests
 dm/host/tests/*	-	host tests
 dm/gfx/tex/tests/*	-	CPU texture tests
 dm/sanitizers/*	-	test sanitizer configuration
-dm/ios/tests/*	-	iOS tests
 .github/*	-	CI
 dm/games/*/README.md	-	a game's note
 dm/games/*/smoke.tsv	-	a harness route
@@ -24,7 +23,6 @@ dm/games/*	profile	one game's profile
 scripts/build_ipa_from_nsp.py	*:*	packing: every game's build
 scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
-scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
 dm/tools/usage.py	-	the usage manifests
 dm/tools/il2cpp_sym.py	-	read-only IL2CPP address analysis; not part of a game build or the host
@@ -150,6 +148,5 @@ dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks,
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/front.h	present:*	the front end
-dm/ios/*	*:*	the iOS app
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs	shader:stage:gs	geometry compute varying slots
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs	shader:stage:gs	geometry compute input and output lowering

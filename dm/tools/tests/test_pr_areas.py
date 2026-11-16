@@ -35,9 +35,9 @@ class Labels(unittest.TestCase):
         self.assertEqual(self.names('dm/gfx/tools/dmsh_build.py'), {'shader chain'})
         self.assertEqual(self.names('dm/gfx/nvn/dmsh_chain.h'), {'nvn', 'shader chain'})
         self.assertEqual(self.names('dm/gfx/nvn/dmsh_abi.h'), {'nvn', 'shader chain'})   # in DMSH_CHAIN's files
-        self.assertEqual(self.names('dm/ios/tools/ios_metal.py'), {'ios', 'shader chain'})
         self.assertEqual(self.names('dm/gfx/tools/dmsh_mtlcache.py'), set())   # a dmsh_ tool outside the chain
         self.assertEqual(self.names('scripts/build_ipa_from_nsp.py'), {'packing', 'tools'})
+        self.assertEqual(self.names('scripts/build_asahi_from_nsp.py'), {'packing', 'tools'})
         self.assertEqual(self.names('README.md', '.github/workflows/tests.yml'), {'docs', 'ci'})
 
     def test_game(self):

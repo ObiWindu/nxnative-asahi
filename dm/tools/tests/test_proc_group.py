@@ -289,7 +289,12 @@ class Supervisor(Tree):
         self.assertEqual(g.stragglers, [])   # a stop, not a straggler: the caller reports its own error
 
 
-def proc_status(pid):   # a process's state from its proc_bsdinfo: gone, zombie, stopped or running
+def proc_status(pid):   # a process's state: gone, zombie, stopped or running
+    if proc_group._libproc is None:   # Linux: /proc
+        try:
+            state = open(f'/proc/{pid}/stat').read().split()[2]
+        except OSError: return 'gone'
+        return {'Z': 'zombie', 'T': 'stopped', 't': 'stopped'}.get(state, 'running')
     info = ctypes.create_string_buffer(136)
     if proc_group._libproc.proc_pidinfo(pid, 3, 0, info, 136) != 136: return 'gone'
     return {5: 'zombie', 4: 'stopped'}.get(int.from_bytes(info.raw[4:8], 'little'), 'running')

@@ -440,14 +440,13 @@ static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
     (void)sig; (void)si;
     thr_t *t = pthread_getspecific(g_keythr);
     if (!t || !atomic_load(&t->pause_req) || atomic_load(&t->svc_regs)) return;
-    ucontext_t *uc = uc_; const struct __darwin_arm_thread_state64 *ss = &uc->uc_mcontext->__ss;
+    ucontext_t *uc = uc_;
+#ifdef __APPLE__
+    const struct __darwin_arm_thread_state64 *ss = &uc->uc_mcontext->__ss;
     if (!module_of((void *)__darwin_arm_thread_state64_get_pc(*ss))) return;   // in host code: do not stop; the requester resends
     g_lock();
     if (t->pause_req) {
         for (int i = 0; i < 29; i++) t->ctx_x[i] = ss->__x[i];
-        // x18 is the Apple platform register: the rewriter keeps the guest's x18 in its thread slot (patch_nso.py K18), and compiled game code may hold an object pointer there,
-        // which a collector scanning this context (IL2CPP's, through GetThreadContext3) would otherwise not see. The rewriter's x18 sequences also park two registers up to 24 bytes
-        // below sp for a few instructions, so the reported sp is 32 bytes lower: the collector scans the stack upward from it, and a few extra words cost a conservative scan nothing
         t->ctx_x[18] = (uint64_t)(uintptr_t)pthread_getspecific(g_key18);
         t->ctx_fp = __darwin_arm_thread_state64_get_fp(*ss); t->ctx_lr = __darwin_arm_thread_state64_get_lr(*ss);
         t->ctx_sp = __darwin_arm_thread_state64_get_sp(*ss) - 32; t->ctx_pc = __darwin_arm_thread_state64_get_pc(*ss); t->ctx_pstate = ss->__cpsr;
@@ -457,6 +456,25 @@ static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
         t->paused = 0; t->ctx_ok = 0;
     }
     g_unlock();
+#else
+    /* Linux AArch64: the signal frame carries the general-purpose registers,
+       sp/pc/pstate. The vector registers are not part of ucontext_t's portable
+       view; a collector that needs them reports that gap. */
+    mcontext_t *mc = &uc->uc_mcontext;
+    if (!module_of((void *)(uintptr_t)mc->pc)) return;
+    g_lock();
+    if (t->pause_req) {
+        for (int i = 0; i < 29; i++) t->ctx_x[i] = mc->regs[i];
+        t->ctx_x[18] = (uint64_t)(uintptr_t)pthread_getspecific(g_key18);
+        t->ctx_fp = mc->regs[29]; t->ctx_lr = mc->regs[30];
+        t->ctx_sp = mc->sp - 32; t->ctx_pc = mc->pc; t->ctx_pstate = mc->pstate;
+        memset(t->ctx_v, 0, sizeof t->ctx_v); t->ctx_fpcr = 0; t->ctx_fpsr = 0;
+        t->ctx_ok = 1;
+        while (t->pause_req) { t->paused = 1; pthread_cond_broadcast(&t->pcv); g_cond_wait(&t->pcv, NULL); }
+        t->paused = 0; t->ctx_ok = 0;
+    }
+    g_unlock();
+#endif
 }
 // called by the gate on SVC entry / exit (gate_dispatch in hle.c)
 void thr_svc_enter(uint64_t *regs, uint64_t pc) {

@@ -1,149 +1,287 @@
-# nxnative
+# nxnative-asahi
 
-Play your own Nintendo Switch and Switch 2 games natively on Apple silicon Macs, iPhone and iPad. One script packs your game into a Mac app or an unsigned IPA that you sideload.
+**nxnative-asahi** is a native Nintendo Switch runtime for **Asahi Linux on Apple
+Silicon**. It ports the features and capabilities of the
+[nxnative](https://github.com/seedds/nxnative) project to Linux, using Linux
+facilities instead of Apple frameworks: AArch64 guest code execution, Horizon
+OS services, a native Vulkan renderer through Mesa's Honeykrisp driver, SDL3
+windowing/input/audio and a Linux desktop launcher.
 
-It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
+The game's own ARM64 code runs directly on the Apple chip. The rewriter changes
+only instructions that depend on the console kernel, and the host answers
+Horizon's supervisor calls and services. It is not an emulator in the
+instruction-interpretation sense, and nothing from a game is included in this
+repository.
 
-[Games](#games) · [Community front ends](#community-front-ends) · [Requirements](#requirements) · [How to play](#how-to-play) · [Discussions](#discussions) · [For developers](#for-developers)
+> **Port status:** the Linux foundation, Vulkan device, 16 KiB-page memory
+> model, NVN→Vulkan replay, audio, input, launcher and Linux-native game
+> preparation are implemented and tested with synthetic workloads and real GPU
+> draws. No retail game has been run in the development environment yet; the
+> first real-game bring-up is the current milestone. See
+> [docs/ASAHI_STATUS.md](docs/ASAHI_STATUS.md) for the tested state and
+> [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the precise matrix.
 
-## Games
+## Relationship to nxnative
 
-The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
+nxnative was built around macOS and iOS, Apple's graphics and audio frameworks,
+and Apple's SDKs. nxnative-asahi is an independent Linux fork that keeps the
+useful emulator functionality — the AArch64 loader and execution, memory model,
+Horizon services, shader translation, NVN command model and game profiles — and
+replaces the platform layer.
 
-These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` file or a dump folder](#switch-2-games):
+The macOS implementation is being **phased out as the port advances**. The iOS
+application and IPA packaging have been removed. Metal compilation and the iOS
+shader targets have been removed from the Asahi shader build. Legacy macOS files
+and tools still present in the tree are not part of the Asahi target and are
+removed or replaced as their Linux equivalents become complete. This fork makes
+no promise of continued macOS or iOS compatibility.
 
-- [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md)
-- [Fast Fusion](dm/games/040041E0212AE000/README.md)
-- [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) — up to 120 fps
-- [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md)
-- [Kirby Air Riders](dm/games/040077201BE50000/README.md)
-- [Mario Kart World](dm/games/0400C3F00006E000/README.md)
-- [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md)
-- [Nintendo Switch Sports Resort](dm/games/04008E001F098000/README.md)
-- [Orbitals](dm/games/040032B023CA4000/README.md) — two players: a controller for player 2
-- [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
-- [PRAGMATA](dm/games/0400C76024710000/README.md)
-- [Splatoon Raiders](dm/games/0400380020056000/README.md)
-- [Star Fox](dm/games/0400E88025B1A000/README.md)
-- [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md)
-- [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md)
+## Features
 
-## Community front ends
+Implemented and exercised by the Linux build:
 
-Community projects build on nxnative with tools to turn your games into apps for your iPhone, iPad or Mac without the command line, and libraries to organize and launch them. They are separate projects: questions and bugs about them go to their own pages.
+- native AArch64 execution of the guest, ELF/NSO loading, relocations, `DT_INIT`
+  and `nnMain`;
+- 4 KiB guest memory on 16 KiB Asahi pages, aliases, dirty spans and W^X;
+- a real Vulkan device and queue through Mesa Honeykrisp, with runtime feature
+  and format queries rather than hard-coded device assumptions;
+- an NVN→Vulkan replay: pools, textures, samplers, render targets, clears,
+  copies, fences, events, vertex/fragment pipelines, vertex attributes,
+  uniforms, storage buffers, storage images, compute dispatches, alpha tests,
+  logic operations, Porter-Duff advanced blending, geometry shaders (one
+  variant per input topology), tessellation, 2D-array/cube/3D textures, MSAA
+  resolve, guest texture readback and swapchain presentation;
+- guest-facing Vulkan interception for titles that ship a Vulkan loader;
+- SDL3 audio through PipeWire/ALSA for `AudioOut` and `OutputStream`, with a
+  timed silent fallback;
+- SDL3 keyboard and gamepad input;
+- a graphical launcher with game discovery, frame-rate/render-scale/mute
+  settings, save backup/delete and per-game runtime selection;
+- a Linux-native preparation path for NSP folders, Switch 2 `.nup` containers
+  and dump folders, including DLC and update-only containers.
 
-- [NX2Apple](https://github.com/LNPANDY/NX2Apple) — Mac builder with a shared iPhone/iPad game library.
-- [NX Play](https://github.com/varyform/nx-native-wrapper) — Mac library with device installs and save sync.
-- [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) — Mac launcher with guided builds and controller mapping.
-- [LumaNX](https://github.com/Xc1Ym/LumaNX) — Mac game builder with IPA export.
-- [GameCase](https://github.com/Tiaoge-tou/GameCase) — iOS game library based on LiveContainer.
+Known gaps are listed in [docs/ASAHI_STATUS.md](docs/ASAHI_STATUS.md). Bindless
+pool arrays, descriptor arrays, NVN2 mesh/task replay, movies, rumble, motion,
+multiple controllers and applets are incomplete. Unsupported draws are refused
+with a `[RED]` line rather than rendered incorrectly.
 
-## Requirements
+## Hardware and software requirements
 
-- **Mac:** Apple silicon, macOS 26.6 or later. Building games requires Xcode 27.2.
-- **iPhone:** A17 Pro chip or later, with iOS 26 or later.
-- **iPad:** M1 chip or later, with iPadOS 26 or later.
+- **OS:** Fedora Asahi Remix 44, with a 16 KiB-page Asahi kernel. Other
+  AArch64 Linux distributions may work if they provide the same kernel, Mesa
+  and Vulkan capabilities.
+- **Hardware:** Apple Silicon M1 or M2 initially. M3/M4 and later are
+  capability-dependent: support depends on the installed Asahi kernel,
+  firmware, Mesa Vulkan driver and the features it exposes.
+- **GPU:** Mesa's Apple Vulkan implementation (Honeykrisp). The host queries
+  the device; it does not assume a GPU name or a fixed extension set.
+- **Display:** Wayland preferred; X11 is supported where SDL3 can create a
+  surface.
+- **Build tools:** CMake, Ninja, GCC or Clang, Python 3.12+.
+- **Runtime libraries:** the Vulkan loader and headers, SDL3, and
+  PipeWire/ALSA for audio.
+- **Python modules for game preparation:** `lz4`, `capstone` 5.x,
+  `fonttools`, `zbic` and `zstandard`.
 
-The games' textures are BC-compressed, which older iPhones cannot read. Switch 2 builds are tested on the Mac; check each game's note for device-specific validation.
+No Nintendo firmware, keys, games or SDK files are shipped or required to build
+the tests.
 
-For a game without a profile, the script writes a survey and tries a provisional build with guessed settings. That build may not start; see [Port another game](docs/development.md#port-another-game).
+## Installation
+
+### 1. Install the build dependencies
+
+On Fedora Asahi Remix:
+
+```sh
+sudo dnf install cmake ninja-build gcc gcc-c++ python3-pip \
+  vulkan-loader vulkan-headers SDL3 pipewire pipewire-alsa
+```
+
+Package names vary by distribution. `SDL3` is loaded at run time; the host does
+not require the SDL3 development headers for its own build. Install the
+`vulkan-validation-layers` package if you want to run with
+`NX_VK_VALIDATION=1`.
+
+Install the Python game-preparation modules:
+
+```sh
+python3 -m pip install --user lz4 'capstone>=5,<6' fonttools zbic zstandard
+```
+
+The Linux shader translator, NSP extractor and SPIRV-Cross are committed as
+native AArch64 Linux binaries in the repository. Building them from source
+needs .NET 10 only for the two C# tools; ordinary builds and game preparation
+need no .NET, Xcode or Apple SDK.
+
+### 2. Build the platform and tests
+
+```sh
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNXNATIVE_BUILD_TESTS=ON
+cmake --build build -j"$(nproc)"
+ctest --test-dir build --output-on-failure
+```
+
+### 3. Build a runtime for a game profile
+
+A host build is profile-specific; there is deliberately no default game:
+
+```sh
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNXNATIVE_BUILD_HOST=ON \
+  -DNXNATIVE_GAME=<base-game-title-id>
+cmake --build build -j"$(nproc)"
+```
+
+The title ID is the base game's 16-hex-digit ID; the profile is read from
+`dm/games/<id>/game.tsv`. Profiles outside the repository can be selected with
+`DM_GAMES_DIR`.
+
+To build several per-profile runtimes for the launcher:
+
+```sh
+scripts/build_asahi_games.sh <base-title-id> [more...]
+NXNATIVE_RUNTIME_DIR=$PWD/build-asahi/runtimes build/nxnative-launcher
+```
+
+`scripts/build_asahi.sh` is a convenience wrapper for the platform, graphics
+and tests; set `GAME=<id>` to build a host too.
+
+### 4. Prepare a game
+
+The preparation script accepts an NSP folder, a Switch 2 `.nup` container (or
+the folder holding it), or a dump folder with `base/`, `updates/` and `dlc/`:
+
+```sh
+# NSP folder: prod.keys is required
+python3 scripts/build_asahi_from_nsp.py "<NSP folder>" -k prod.keys
+
+# Switch 2 .nup or dump folder: no keys
+python3 scripts/build_asahi_from_nsp.py "<game.nup>"
+python3 scripts/build_asahi_from_nsp.py "<dump folder>"
+```
+
+The script extracts the game files, rewrites the code modules, splits and
+translates the shaders to SPIR-V, builds the profile runtime and assembles a
+launcher-ready game folder. It prints a direct launch command and a launcher
+command. Work files stay in `<source>/<id>_build/`; delete that folder to start
+over.
+
+### 5. Run
+
+```sh
+build/nxnative-asahi sysinfo
+build/nxnative-asahi vk-info
+build/nxnative-asahi profile
+build/nxnative-asahi run <prepared-game-folder> main
+```
+
+Or start the graphical launcher:
+
+```sh
+NXNATIVE_GAMES_DIR=<folder of prepared games> build/nxnative-launcher
+```
+
+The launcher writes per-game settings under `$XDG_CONFIG_HOME/nxnative/launcher`
+and launches with `DM_ROMFS`, `DM_SAVE`, `DM_TEMP`, the game's shader directory
+and any per-game `nxnative.env` overrides.
+
+For a headless smoke test of the host:
+
+```sh
+SDL_VIDEODRIVER=dummy build/nxnative-asahi run build/synth-game main
+```
 
 ## How to play
 
-Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and are tested on the Mac only: see [Switch 2 games](#switch-2-games).
+The supported workflow is:
 
-### Build from the command line
+1. install the dependencies above;
+2. build the platform and a runtime for your game's profile;
+3. prepare the game with `scripts/build_asahi_from_nsp.py`;
+4. launch it from the printed command or from `nxnative-launcher`.
 
-You need a Mac with macOS 26.6 or later, [Xcode](https://developer.apple.com/download/all/?q=Xcode%2027.2) 27.2, [Homebrew](https://brew.sh) and Python 3.12 or newer (an arm64 one, not an Intel Homebrew's). An iPhone build also needs Xcode's iOS platform (Xcode → Settings → Components).
+See [docs/BUILDING.md](docs/BUILDING.md) for the detailed build and preparation
+instructions, [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common
+failures and [docs/ASAHI_STATUS.md](docs/ASAHI_STATUS.md) for the current
+limitations.
 
-The shaders are built with Xcode 27.2's Metal compiler. Select it before step 1: `sudo xcode-select -s /Applications/Xcode.app`. With several Xcode versions installed, name this one `Xcode-27.2.app` and select it with `sudo xcode-select -s /Applications/Xcode-27.2.app`.
+## Tests
 
-**1. Install the tools** (only once), in Terminal:
+The Linux test suite needs no game files:
 
-```
-xcodebuild -downloadComponent MetalToolchain
-git clone https://github.com/seedds/nxnative.git && cd nxnative
-brew install xcodegen zstd glslang
-python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
-```
-
-**2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
-
-```
-~/Games/MarioWonder/
-  Super Mario Bros. Wonder [010015100B514000][v0].nsp
-  Super Mario Bros. Wonder [010015100B514800][v327680].nsp
+```sh
+ctest --test-dir build --output-on-failure
 ```
 
-**3. Build**, with your game folder and your `prod.keys`:
+It covers the 16 KiB memory model, synthetic NSO loading and execution, real
+Vulkan rendering and readback, NVN replay (draws, textures, compute, geometry,
+tessellation, MSAA, alpha, logic operations, advanced blending, bindless
+handles in uniform buffers), presentation, audio, launcher settings/saves and
+the Linux tools.
 
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
-```
+The Python tool tests cover extraction, rewriting, shader splitting, NUP/dump
+handling, profiles and documentation:
 
-The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
-
-To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
-
-### Install
-
-Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.
-
-Game too big to install? Build again with `--romfs separate`, and run the command the script prints once to copy the game files to your phone ([Quick reinstalls](docs/development.md#quick-reinstalls)). With AltServer, also add `--shader-files`: it cannot install a file of 2 GiB or more.
-
-Controls, saves and settings: [Playing](docs/playing.md).
-
-### Switch 2 games
-
-A Switch 2 game is built from one [NUP](https://github.com/a55uka/nup) container (a `.nup` file) or a folder of its files, not from NSPs. Neither needs `prod.keys`. A game this project has no profile for is surveyed and gets a provisional profile, as NSPs do ([Port another game](docs/development.md#port-another-game)), which may not boot. You get a Mac app; iPhone and iPad are untested.
-
-**From a `.nup` file**, which holds the base game, its updates and DLC in one file. Give the file, or a folder that holds it:
-
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
+```sh
+python3 -m pytest dm/tools/tests -q
 ```
 
-[Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) is played this way: its 47 GB NUP unpacks in under five minutes. A NUP that carries the game's control data (its NACP) and icon gives the app the game's name and icon; otherwise the name comes from the game's profile and the app has no icon unless you give it one with `--icon <image>` (`ICON` in Spyder; a JPEG or PNG of any size).
+GPU and desktop tests are meaningful only on real Asahi hardware; run them
+locally. The development environment used for the current status is an Apple
+M2 Pro, Fedora Asahi Remix 44, kernel 7.2.12 and Mesa 26.2.6 Honeykrisp.
 
-A NUP without the base game also works, when its base package is empty or it has none and its updates are marked `standalone_update`: the update is taken as the whole game, and the script says so. If the game then stops on missing files, that update holds only what changed: pack a NUP with the base game. The newest update is selected by default; `--package v<N>` selects another version in the container. Such a container has no `v0` (base game) to select.
+## Contributing
 
-**From a folder of files**. The script expects this layout (`updates` and `dlc` are optional):
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
+opening a pull request.
 
-```
-~/Games/DonkeyKongBananza/
-  base/exefs/                     main, main.npdm, sdk, rtld
-  base/romfs/
-  updates/458752/exefs/           the update's version, as a decimal number
-  updates/458752/romfs/           the patched RomFS, not a patch
-  dlc/040074a01bf13001/0/romfs/   the DLC's title ID
-```
+In short:
 
-```
-python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-app
-```
+- this is an **Asahi Linux-first** project; do not add new macOS, iOS, Xcode,
+  Metal, Objective-C or Apple SDK dependencies, and do not preserve an Apple
+  code path just for compatibility;
+- keep the useful emulator functionality: fix the root cause rather than
+  hiding a symptom;
+- never commit game files, keys, title keys, firmware or extracted game data;
+- run the CMake and Python tests relevant to the change, and say what was
+  tested on real hardware;
+- after changing a shader-chain tool, regenerate
+  `dm/gfx/nvn/dmsh_chain.h` with
+  `python3 dm/gfx/tools/dmsh_chain.py --header`;
+- document game-specific findings in the game's profile note and general
+  mechanisms in `docs/reference/`;
+- contributions are accepted under the project's MIT license.
 
-An update's folder alone will do (no `base/`), and so will `exefs/` and `romfs/` directly in the folder, as `nup extract` writes them, which count as `base/`. The app has no icon, because the folder holds none; `--icon <image>` (`ICON` in Spyder) gives it one. To turn such a folder into a NUP: `nup pack ~/Games/DonkeyKongBananza game.nup`.
+Large changes, new device classes, new rendering paths and new platform
+baselines should be discussed in an issue before implementation.
 
-## Discussions
+## Documentation
 
-Questions, how a game runs on your Mac or iPhone, and ideas go in [Discussions](https://github.com/seedds/nxnative/discussions); [Issues](https://github.com/seedds/nxnative/issues) are for bugs, with the log. Ocarina of Time's performance (frame rate, resolution, which Macs hold 60 fps) is followed in [Ocarina of Time: state on main](https://github.com/seedds/nxnative/discussions/1789).
-
-## For developers
-
-[How it works](docs/development.md) · [Game notes](dm/games/README.md#games) · [Bring-up and debugging](docs/agents/README.md) · [Front ends](docs/frontends.md) · [Contributing](CONTRIBUTING.md)
-
-## Acknowledgements
-
-This project is built on other people's work ([licenses](dm/third_party/README.md)):
-
-- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
-- **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, in `dm/third_party/ryujinx` with a few fixes listed in [its README](dm/third_party/ryujinx/README.md)) turns the games' shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
-- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables).
-- **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`.
-- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
-- **[glslang](https://github.com/KhronosGroup/glslang)** compiles the GLSL of OpenGL games to SPIR-V for it.
-- **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** (MIT): the GPU widening of 8-bit indices and in-pass clears in `dm/gfx/nvn/nvn_mtl.m`, and the visibility-counter lowering in the shader translator.
+- [Architecture](docs/ASAHI_ARCHITECTURE.md)
+- [Building and installation](docs/BUILDING.md)
+- [Memory model](docs/MEMORY_MODEL.md)
+- [Graphics](docs/GRAPHICS.md)
+- [Compatibility](docs/COMPATIBILITY.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Status and limitations](docs/ASAHI_STATUS.md)
+- [Agent-oriented development notes](docs/agents/README.md)
 
 ## License
 
-MIT ([LICENSE](LICENSE)). Third-party code keeps its own license ([dm/third_party](dm/third_party/README.md)).
+nxnative-asahi is free software under the **MIT License**. See [LICENSE](LICENSE)
+for the full text. By contributing, you agree that your contribution is
+licensed under the same terms.
+
+## Legal and attribution
+
+This project does not include Nintendo firmware, `prod.keys`, title keys, games
+or other copyrighted material. Users must supply their own legally obtained game
+files and keys. Development and tests use synthetic data and real GPU workloads.
+
+nxnative-asahi is an independent fork started from the nxnative codebase. The
+original nxnative copyright notice and MIT license are retained in
+[LICENSE](LICENSE). Nintendo Switch is a trademark of Nintendo; this project is
+not affiliated with or endorsed by Nintendo.

@@ -480,6 +480,7 @@ class Pack(Base):
         nac = bytearray(nac); struct.pack_into('<I', nac, 0x302C, 0b11); (u / 'control.nacp').write_bytes(nac)
         self.assertEqual(nsp.languages_control(u, b), u / 'control.nacp')
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'the removed iOS build script')
     def test_ipa_settings_read_the_picked_file_and_the_version_the_packed_one(self):   # build_ipa.sh's own lines: CONTROL is the NSP script's languages_control
         self.assertIn('CONTROL=str(control)', (REPO / 'scripts/build_ipa_from_nsp.py').read_text(encoding='utf-8'))
         script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text(encoding='utf-8')
@@ -563,6 +564,7 @@ class Main(Base):
             seen.update(env)
             if not extract: raise Stop()
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), mock.patch.object(nsp, 'PROD_KEYS', ''), \
+             mock.patch.object(nsp, 'free_gb', return_value=1e9), \
              mock.patch.object(nsp, 'check_prereqs', side_effect=stop), mock.patch.object(nsp, 'say', side_effect=said.append), \
              mock.patch.object(nsp, 'check_versions_aarch64', side_effect=Stop), \
              mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked for something')), mock.patch.object(nsp, 'package_reader', side_effect=AssertionError('read a package')):

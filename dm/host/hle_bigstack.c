@@ -21,7 +21,7 @@
 int dm_guest_as_contains(uintptr_t a);   // hle_svc.c
 
 #define BS_SIZE (512u << 10)
-#define BS_GUARD 16384u
+#define BS_GUARD (64u << 10)   // one host page or more; Asahi is 16 KiB
 static pthread_key_t g_bs_key;
 static pthread_once_t g_bs_once = PTHREAD_ONCE_INIT;
 static void bs_free(void *top) { if (top) munmap((uint8_t *)top - BS_SIZE - BS_GUARD, BS_SIZE + BS_GUARD); }
@@ -50,13 +50,13 @@ uintptr_t dm_bigstack_top(uintptr_t sp) {
 __asm__(
     ".text\n"
     ".p2align 2\n"
-    ".globl _dm_bigstack_enter\n"
-    ".private_extern _dm_bigstack_enter\n"
-    "_dm_bigstack_enter:\n"
+    ".globl dm_bigstack_enter\n"
+    ".hidden dm_bigstack_enter\n"
+    "dm_bigstack_enter:\n"
     "    mov x17, #0\n"
-    ".globl _dm_bigstack_enter_n\n"
-    ".private_extern _dm_bigstack_enter_n\n"
-    "_dm_bigstack_enter_n:\n"
+    ".globl dm_bigstack_enter_n\n"
+    ".hidden dm_bigstack_enter_n\n"
+    "dm_bigstack_enter_n:\n"
     "    sub sp, sp, #0xb0\n"
     "    stp x29, x30, [sp, #0xa0]\n"
     "    add x29, sp, #0xa0\n"
@@ -71,7 +71,7 @@ __asm__(
     "    stp d6, d7, [sp, #0x80]\n"
     "    stp x17, x19, [sp, #0x90]\n"
     "    mov x0, sp\n"
-    "    bl _dm_bigstack_top\n"
+    "    bl dm_bigstack_top\n"
     "    mov x17, x0\n"
     "    ldp x0, x1, [sp, #0x00]\n"
     "    ldp x2, x3, [sp, #0x10]\n"
@@ -98,9 +98,9 @@ __asm__(
     "    subs x11, x11, #16\n"
     "    b.ne 2b\n"
     "3:  blr x16\n"
-    ".globl _dm_bigstack_ret\n"
-    ".private_extern _dm_bigstack_ret\n"
-    "_dm_bigstack_ret:\n"
+    ".globl dm_bigstack_ret\n"
+    ".hidden dm_bigstack_ret\n"
+    "dm_bigstack_ret:\n"
     "    ldr x9, [x19]\n"
     "    mov sp, x9\n"
     "    ldr x19, [sp, #0x98]\n"
@@ -112,7 +112,7 @@ __asm__(
     "    add sp, sp, #0xb0\n"
     "    br x16\n");
 
-// The return address inside an implementation that came through the switch is _dm_bigstack_ret; the game's own is in the slot the entry stored below this thread's host stack top. Only the outermost
+// The return address inside an implementation that came through the switch is dm_bigstack_ret; the game's own is in the slot the entry stored below this thread's host stack top. Only the outermost
 // take-over of a thread switches (a nested one already runs off the guest block and is jumped to directly), so that slot belongs to the call in progress
 void *dm_bigstack_caller(void *ra) {
     extern const char dm_bigstack_ret[];
@@ -127,8 +127,8 @@ static void log_emit(const char *fmt, va_list *ap) {
     flockfile(stderr); vfprintf(stderr, fmt, *ap); fputc('\n', stderr); funlockfile(stderr);
 }
 void log_emit_bs(const char *fmt, va_list *ap);
-__asm__(".text\n.p2align 2\n.globl _log_emit_bs\n.private_extern _log_emit_bs\n_log_emit_bs:\n"
-        "    adrp x16, _log_emit@PAGE\n    add x16, x16, _log_emit@PAGEOFF\n    b _dm_bigstack_enter\n");
+__asm__(".text\n.p2align 2\n.globl log_emit_bs\n.hidden log_emit_bs\nlog_emit_bs:\n"
+        "    adrp x16, log_emit\n    add x16, x16, :lo12:log_emit\n    b dm_bigstack_enter\n");
 void dm_log(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     log_emit_bs(fmt, &ap);

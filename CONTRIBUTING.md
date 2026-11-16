@@ -1,47 +1,155 @@
-# Contributing
+# Contributing to nxnative-asahi
 
-Issues and pull requests are welcome. This page says how a change gets in; what the code does and where things are is in [AGENTS.md](AGENTS.md) and [docs/development.md](docs/development.md).
+Issues and pull requests are welcome. This page explains how to report a
+problem, how to prepare a change and what a pull request should contain.
+
+nxnative-asahi is an independent **Asahi Linux** fork of nxnative. The project
+runs the game's own AArch64 code natively on Apple Silicon and replaces the
+original Apple platform layer with Linux, SDL3 and real Vulkan. The macOS and
+iOS implementations are being phased out as the port advances.
 
 ## Reporting a problem
 
-Open an issue with the bug report form. It asks for what a problem is traced with: the nxnative commit, the shader chain version, the game's title ID and version, the device and OS, how the game was built and run, environment overrides, and the whole log of the run. [Playing](docs/playing.md) says where the iPhone app's log is; a Mac app writes `~/Library/Logs/nxnative/<title ID>.log`.
+Open an issue with as much of this as you can:
 
-`python3 scripts/bug_report.py <title ID | path to the .app | NSP folder>` collects most of this into one zip to attach: `report.md` with the game, commit, chain version, device, settings and the list of files, plus the Mac app's logs, the NSP script's logs under `<title ID>_build/logs` and recent crash reports. Add `--ios-log log.txt` for an iPhone log. It reads only text logs and settings, never game files or keys; it writes your home folder as `~` and drops lines that look like key material. Look at the zip before you attach it.
+- the nxnative-asahi commit (`git rev-parse --short HEAD`);
+- the game's title ID and version, and its profile under `dm/games/<id>/`;
+- the exact preparation command and the run command;
+- the contents of `nxnative-asahi sysinfo` and `nxnative-asahi vk-info`;
+- the host distribution, kernel, Mesa and Vulkan versions, and whether the
+  session is Wayland or X11;
+- the relevant log from `<source>/<id>_build/logs/` and the host's run log;
+- whether the failure is a crash, hang, `[RED]` line or wrong picture, and the
+  last lines before it.
 
-## Never game files or keys
+`python3 scripts/bug_report.py <title ID | prepared game folder>` collects the
+usual host and build information into one archive. Inspect the archive before
+attaching it. It must not contain game files, keys or title keys.
 
-Never commit or attach game files, keys, title keys or anything extracted from a game: RomFS, code modules, shaders, dumps. Game files and their extractions stay in the game's NSP folder ([AGENTS.md](AGENTS.md)). Logs, screenshots, title IDs, build IDs and offsets are fine.
+Never attach or commit:
+
+- NSP, NUP, XCI, NCA or NRO files;
+- `prod.keys`, title keys or anything that can decrypt a game;
+- RomFS contents, code modules, shader dumps or save files;
+- extracted game data of any kind.
+
+Title IDs, build IDs, offsets, short logs and screenshots of the emulator are
+fine. Game files stay in the game's own folder outside this repository.
 
 ## Before you start
 
-- Read [AGENTS.md](AGENTS.md): it lists where to start for each kind of task, and the rules for profiles, per-build knowledge and the shader translation chain.
-- A crash, a hang or a wrong picture: search the [symptom index](docs/agents/symptoms.md) for the text in the log first.
-- Another game: run `scripts/build_ipa_from_nsp.py` on its NSP folder and follow [Port another game](docs/development.md#port-another-game).
-- Prefer a fix that holds for every game to a game-specific rule, and fix a bug at its cause ([AGENTS.md](AGENTS.md)).
+- Read [README.md](README.md) for the project scope and current status.
+- Read [docs/ASAHI_STATUS.md](docs/ASAHI_STATUS.md) and
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) so a known gap is not reported
+  as a new bug.
+- For a crash, hang or wrong picture, search
+  [docs/agents/symptoms.md](docs/agents/symptoms.md) for the text in the log.
+- For a new title, read [docs/agents/03-bringup.md](docs/agents/03-bringup.md)
+  and the [survey guide](docs/agents/02-survey.md).
+- For graphics work, read [docs/GRAPHICS.md](docs/GRAPHICS.md) and
+  [docs/reference/rendering.md](docs/reference/rendering.md).
 
-## A pull request
+## Development rules
 
-- **One change per PR, off `main`.** Rebase on `main` rather than merging it in.
-- **Commits.** Each commit message says what changed and why, in plain English sentences, as the history does: the symptom, the cause, the fix, and what was measured or checked.
-- **Front ends.** A change a front end has to act on takes a `Front-ends:` line in the commit message and the PR text, unless git already shows it ([Following main](docs/frontends.md#following-main)). A change that makes the host read saves or other kept data differently also carries the old form forward.
-- **Where findings go.** A fact about one game goes in its note (`dm/games/<id>/README.md`). A general mechanism gets an entry in `docs/reference/<subsystem>.md` (Symptom, Cause, Fix, Found on), followed by `python3 dm/tools/docs_symptoms.py`. A new game takes its profile, its note and its row in the games table ([dm/games/README.md](dm/games/README.md)).
-- **The README games list.** Keep README text-only. After Mac gameplay testing, add a Switch 2 game to its list with a link to the game's note. Every supported game, including original Switch games, belongs in the [full games table](dm/games/README.md#games). Record tested builds, devices, IPA sizes and remaining limitations in the game's note.
-- **The shader chain.** After changing one of its tools, run `python3 dm/gfx/tools/dmsh_chain.py --header` and commit `dm/gfx/nvn/dmsh_chain.h` with the change. Every game's shaders are then rebuilt, so say which games you checked.
-- **Tests.** CI runs the host tests, the CPU-only graphics tests, the tool tests and the builds ([Continuous integration](docs/development.md#continuous-integration)). GitHub's runners have no Metal 4, so run the GPU tests on an Apple-silicon Mac: `make -C dm/gfx/tests GAME=<id> run`.
-- **The PR text.** Fill in the template: what and why, what was checked (tests, games, devices), and which docs changed.
+- **Asahi Linux is the target.** Do not add new macOS, iOS, Xcode, Metal,
+  Objective-C, Cocoa, CoreAudio or Apple SDK dependencies. Do not keep an Apple
+  code path working merely for compatibility.
+- **Prefer general fixes.** Fix the Horizon, NVN, Vulkan or memory mechanism
+  rather than adding a per-game branch. A profile key or rewriter cut is for
+  facts that belong to one game/build.
+- **Fix causes, not symptoms.** A stub, skipped call, clamp, retry, sleep,
+  longer timeout or cache flush that only hides the failure must say what the
+  cause is and why it cannot be fixed there.
+- **Do not assume 4 KiB host pages.** All host memory operations must work with
+  the runtime `sysconf(_SC_PAGESIZE)`, including 16 KiB Asahi pages and 4 KiB
+  guest pages.
+- **Do not assume Vulkan capabilities.** Query the device and driver at run
+  time. A missing feature must produce a clear incompatibility, not a wrong
+  picture.
+- **Fail closed in the graphics replay.** An unsupported draw or resource logs
+  a `[RED]` line and is dropped rather than rendered incorrectly.
+- **Keep game data out of the tree.** Profiles contain constants and tables,
+  not game files.
+- **Document findings once.** A fact about one game goes in
+  `dm/games/<id>/README.md`. A general mechanism goes in the matching
+  `docs/reference/` page and in `docs/agents/symptoms.md` through
+  `python3 dm/tools/docs_symptoms.py`.
 
-## Large changes and other platforms
+## Building and testing
 
-- **Agree on the scope first.** Open an issue before writing a change that adds a platform or device class, adds a second implementation of an existing path (for example a rendering path for GPUs without Metal 4), or runs to more than about 1,000 lines. A large PR built on an older `main` can rarely be reviewed or merged, however well it was tested.
-- **One concern per PR.** A new front end, a platform baseline and one game's fixes are separate PRs, each on current `main`.
-- **Supported devices** are the ones [README.md](README.md) names: iOS / iPadOS 26 or later on an iPhone with an A17 Pro chip or later or an iPad with an M1 chip or later, and Macs with Apple silicon. Supporting older devices or Intel Macs is the maintainer's decision, so ask in an issue first: it would add code paths that every later change has to keep working and that few contributors can test.
+A profile is required for a host build; there is deliberately no default game.
 
-## Graphical front ends
+```sh
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNXNATIVE_BUILD_TESTS=ON
+cmake --build build -j"$(nproc)"
+ctest --test-dir build --output-on-failure
+```
 
-An app that packs games, lists them or starts them (a build window, a game library) is a separate project that builds on nxnative, not a part of this repository. [NX2Apple](https://github.com/LNPANDY/NX2Apple) is one, and [README.md](README.md) points players to it. Such an app needs no changes here to work: the NSP script reports its stages as JSON lines (`--progress json`), a built Mac app or IPA carries the list of its game's settings (`dm/launcher.json`, from `dm/games/settings.tsv`), and the app takes those settings as environment switches or as saved choices in its preferences, which every start reads ([Front ends](docs/frontends.md)). When a front end needs more from nxnative (a new event, a field in the settings list), open an issue or a small PR for that piece.
+Build one runtime for a profile:
 
-The settings screen inside the iPhone and iPad app and the settings window inside a Mac app are part of nxnative ([Settings](docs/settings.md)): they draw the same list and keep the same saved choices as any front end.
+```sh
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNXNATIVE_BUILD_HOST=ON \
+  -DNXNATIVE_GAME=<base-title-id>
+cmake --build build -j"$(nproc)"
+```
 
-## How changes get in
+Run the Python tool tests:
 
-The maintainer reviews every PR. A PR is often taken in as a squashed or reworked commit on `main` that credits its author (`Co-authored-by`), and the PR is then closed rather than merged; that is expected. The maintainer may rebase or rework a PR that conflicts with `main` while taking it in.
+```sh
+python3 -m pytest dm/tools/tests -q
+```
+
+Test on real Asahi hardware when the change touches memory, Vulkan, GPU
+synchronization, audio, input, threading or the launcher. Synthetic tests are
+necessary but are not a substitute for a game workload. Say exactly what was
+tested, on which machine and with which kernel/Mesa versions.
+
+After changing a shader-chain tool, regenerate the chain header and commit it
+with the change:
+
+```sh
+python3 dm/gfx/tools/dmsh_chain.py --header
+```
+
+The chain version is shared by every game, so a chain change invalidates shader
+caches. Rebuild the shaders for a representative game or explain why that was
+not possible.
+
+## Pull requests
+
+- **One change per pull request, based on current `main`.** Rebase rather than
+  merging `main` into the branch.
+- **Include tests.** Add or update a test for every behaviour change. A fix
+  without a test is accepted only when the failure cannot be reproduced
+  synthetically; say why.
+- **Update documentation.** Keep the README, `docs/BUILDING.md`,
+  `docs/COMPATIBILITY.md`, `docs/ASAHI_STATUS.md`, the profile note and the
+  reference page in step with the change.
+- **Commit messages** start with `area/component: summary` and explain the
+  symptom, the cause, the fix and what was tested. A change a front end must
+  act on takes a `Front-ends:` line.
+- **No generated game data.** Do not commit a shader cache, a prepared game
+  folder, logs containing keys, or anything extracted from a game.
+- **Be explicit about limits.** If a feature is partial, say which paths work
+  and which are refused.
+
+Large changes — a new platform baseline, a new rendering backend, a second
+implementation of an existing path, or a change over roughly 1,000 lines —
+should start as an issue so scope and approach can be agreed before review.
+
+## License
+
+nxnative-asahi is released under the **MIT License**; see [LICENSE](LICENSE).
+By submitting a contribution, you agree that it is licensed under the same
+terms. Do not contribute code that cannot be redistributed under MIT.
+
+## Attribution
+
+nxnative-asahi started from the nxnative codebase. The original copyright notice
+and MIT license are retained in [LICENSE](LICENSE). Nintendo Switch is a
+trademark of Nintendo; this project is not affiliated with or endorsed by
+Nintendo.

@@ -163,7 +163,8 @@ def subset(lib, dst, skip_suffix=()):   # → the number of files in the image d
     return len(files)
 
 
-def has_library(lib): return next(view(lib).glob('*_b.metallib'), None) is not None
+def has_library(lib): return (next(view(lib).glob('*_b.metallib'), None) is not None
+                              or next(view(lib).glob('*_b.spv'), None) is not None)   # Asahi builds SPIR-V, not Metal libraries
 def left_out_pulling(lib): return (view(lib) / PULLING_LEFT_OUT).is_file()   # whether a build that needs the pulling libraries must make them again
 
 

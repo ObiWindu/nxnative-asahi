@@ -20,11 +20,25 @@
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+#ifdef __APPLE__
 #include <mach/mach_time.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <TargetConditionals.h>
+#include <pthread/qos.h>
+#include <sys/sysctl.h>
+#include <mach/thread_policy.h>
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+#else
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <CommonCrypto/CommonDigest.h>
+#include <TargetConditionals.h>
+#include <pthread/qos.h>
+#include "horizon/linux_compat.h"
+#endif
 #include <unistd.h>
 #include <sys/mman.h>
 #include <errno.h>
@@ -33,14 +47,9 @@
 #else
 #define DM_MEM_CAP_DEFAULT_GB 0
 #endif
-#include <pthread/qos.h>
 #include <sys/resource.h>
-#include <sys/sysctl.h>
-#include <mach/thread_policy.h>
 #include <assert.h>
 #include <stdatomic.h>
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
 
 // ---------- Slot table, thunks, unimplemented stubs ----------
 typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
@@ -76,12 +85,12 @@ typedef struct { const char *name; void *fn; } nvn_impl;
 #define NVN(name, ret, ...)                                                                       \
     static ret h_##name(__VA_ARGS__);                                                             \
     static const NVNT_##name chk_##name __attribute__((unused)) = h_##name;                       \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
+    __attribute__((used, section("swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
     static ret h_##name(__VA_ARGS__)
 // Newer interfaces without prototypes: no signature check
 #define NVN_NOPROTO(name, ret, ...)                                                               \
     static ret h_##name(__VA_ARGS__);                                                             \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
+    __attribute__((used, section("swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
     static ret h_##name(__VA_ARGS__)
 
 static int g_log;
@@ -95,9 +104,16 @@ static unsigned g_nsem;                          // Number of semantic implement
 static void nvn_init_slots(void) {
     static int done; if (done) return; done = 1;
     g_log = getenv("DM_NVN_LOG") != NULL;
+    unsigned nim = 0, hit = 0;
+#ifdef __APPLE__
     unsigned long sz;
     const nvn_impl *im = (const nvn_impl *)getsectiondata(&_mh_execute_header, "__DATA", "swnvn", &sz);
-    unsigned nim = im ? (unsigned)(sz / sizeof *im) : 0, hit = 0;
+    nim = im ? (unsigned)(sz / sizeof *im) : 0;
+#else
+    extern const nvn_impl __start_swnvn[], __stop_swnvn[];
+    const nvn_impl *im = __start_swnvn;
+    nim = (unsigned)(__stop_swnvn - __start_swnvn);
+#endif
     for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
     for (unsigned k = 0; k < nim; k++) {
         unsigned i = 0;
@@ -108,6 +124,11 @@ static void nvn_init_slots(void) {
     g_nsem = hit;
 }
 
+static void *nvn_lookup(const char *name);
+void dm_nvn_install(void);
+void dm_nvn_install(void) { nvn_init_slots(); }
+void *dm_nvn_test_lookup(const char *name);   // tests: the bootstrap table without a guest relocation
+void *dm_nvn_test_lookup(const char *name) { return nvn_lookup(name); }
 static void *nvn_lookup(const char *name) {
     nvn_init_slots();
     for (unsigned i = 0; i < NVN_NFUNC; i++)
@@ -765,7 +786,9 @@ NVN(nvnProgramFinalize, void, NVNprogram *p) {
 // random keys, "not in the shader map", draws skipped and a picture of noise. A record stays as long as the process (64 bytes and a table entry a SetShaders): a copy can
 // outlive the program it was made from, and the host cannot see when the last copy goes. The Metal side finds a program's translation by its serial too (prog_get)
 typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
-static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // serial → record
+static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER;   // serial → record
+#ifdef __APPLE__
+static CFMutableDictionaryRef g_pk;
 static prog_keys_t *pk_get(uint64_t serial) {
     pthread_mutex_lock(&g_pk_mu);
     if (!g_pk) g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
@@ -774,6 +797,33 @@ static prog_keys_t *pk_get(uint64_t serial) {
     pthread_mutex_unlock(&g_pk_mu);
     return k;
 }
+#else
+typedef struct { uint64_t serial; prog_keys_t *k; } pk_ent;
+static pk_ent *g_pk; static size_t g_pk_cap, g_pk_n;
+static void pk_grow(void) {
+    size_t cap = g_pk_cap ? g_pk_cap * 2 : 256;
+    pk_ent *tab = calloc(cap, sizeof *tab);
+    for (size_t i = 0; i < g_pk_cap; i++) if (g_pk[i].k) {
+        size_t j = (size_t)(g_pk[i].serial * 0x9E3779B97F4A7C15ull) & (cap - 1);
+        while (tab[j].k) j = (j + 1) & (cap - 1);
+        tab[j] = g_pk[i];
+    }
+    free(g_pk); g_pk = tab; g_pk_cap = cap;
+}
+static prog_keys_t *pk_get(uint64_t serial) {
+    pthread_mutex_lock(&g_pk_mu);
+    if (!g_pk) pk_grow();
+    size_t j = (size_t)(serial * 0x9E3779B97F4A7C15ull) & (g_pk_cap - 1);
+    while (g_pk[j].k && g_pk[j].serial != serial) j = (j + 1) & (g_pk_cap - 1);
+    if (!g_pk[j].k) {
+        if ((g_pk_n + 1) * 2 > g_pk_cap) { pk_grow(); j = (size_t)(serial * 0x9E3779B97F4A7C15ull) & (g_pk_cap - 1); while (g_pk[j].k) j = (j + 1) & (g_pk_cap - 1); }
+        g_pk[j].serial = serial; g_pk[j].k = calloc(1, sizeof *g_pk[j].k); g_pk_n++;
+    }
+    prog_keys_t *k = g_pk[j].k;
+    pthread_mutex_unlock(&g_pk_mu);
+    return k;
+}
+#endif
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
 // The control section's bytes in the key and the code area's length. NVN: +0x704 is the code area's length; +0x20 holds the section's own length: sections of at least
 // 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own

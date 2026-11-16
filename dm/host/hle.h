@@ -7,7 +7,7 @@
 typedef struct { const char *name; void *fn; } hle_ent;
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
+    __attribute__((used, section("swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
     static ret cname(__VA_ARGS__)
 
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
@@ -52,18 +52,18 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
     _Static_assert(HLE_NARG(__VA_ARGS__) <= 16, #cname ": more parameters than the big-stack entry carries over (hle.h)"); \
     static ret cname(__VA_ARGS__) __attribute__((used));                                          \
     extern const char cname##_bs[];                                                               \
-    __asm__(".text\n.p2align 2\n_" #cname "_bs:\n" \
-            "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n"              \
+    __asm__(".text\n.p2align 2\n.globl " #cname "_bs\n.hidden " #cname "_bs\n" #cname "_bs:\n" \
+            "    adrp x16, " #cname "\n    add x16, x16, :lo12:" #cname "\n"              \
             ".if " HLE_STR(HLE_NARG(__VA_ARGS__)) " > 8\n    mov x17, #(((" HLE_STR(HLE_NARG(__VA_ARGS__)) " - 8) * 8 + 15) & ~15)\n" \
-            "    b _dm_bigstack_enter_n\n.else\n    b _dm_bigstack_enter\n.endif\n");           \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why}; \
+            "    b dm_bigstack_enter_n\n.else\n    b dm_bigstack_enter\n.endif\n");           \
+    __attribute__((used, section("swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_bs, why}; \
     static ret cname(__VA_ARGS__)
 // Same as above, but the implementation runs on the caller's stack. Only for a take-over that runs the game's own code (an NRO's init and fini, a JIT plugin): that code's stack
 // use is the game's, sized for the thread's own stack (which can be larger than the 512 KB host stack), and it may switch stacks itself (a coroutine), which would reuse the
 // host stack the take-over is on. A short call into the SDK (fs::IsMounted, the audio renderer's command generation) is no reason. Say why beside it
 #define HLE_FORCE_DIRECT(mangled, why, ret, cname, ...)                                            \
     static ret cname(__VA_ARGS__);                                                                \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+    __attribute__((used, section("swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
     static ret cname(__VA_ARGS__)
 // A guest alias: every reference to mangled binds to the loaded modules' own definition of target instead, as if the module had imported target. No host code runs and no
 // signature is restated, so the alias holds for every SDK that defines both. For a hardware class whose constructor the host takes over to build the SDK's software class in the
@@ -72,15 +72,19 @@ typedef struct { const char *name; void *fn; const char *why; const char *to; } 
 #define HLE_FORCE_ALIAS(mangled, target, why) HLE_FORCE_ALIAS_(mangled, target, why, __COUNTER__)
 #define HLE_FORCE_ALIAS_(mangled, target, why, n) HLE_FORCE_ALIAS__(mangled, target, why, n)
 #define HLE_FORCE_ALIAS__(mangled, target, why, n) \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_alias_##n = {mangled, NULL, why, target}
+    __attribute__((used, section("swforce"))) static const hle_force_ent hle_force_alias_##n = {mangled, NULL, why, target}
 // Programs that do not link hle_bigstack.c (unit tests, whose stacks are host stacks) get this pass-through: the implementation runs on the caller's stack, as dm.h's weak dm_log
 // writes there. The host's entry (hle_bigstack.c) replaces it at link time
+#if !defined(__linux__)
 __attribute__((weak, naked, visibility("hidden"))) void dm_bigstack_enter(void) { __asm__ volatile("br x16"); }
 __attribute__((weak, naked, visibility("hidden"))) void dm_bigstack_enter_n(void) { __asm__ volatile("br x16"); }
+#endif
 // The game's call site inside a HLE_FORCE implementation: pass __builtin_return_address(0), which after a stack switch is the entry's own (hle_bigstack.c). The weak one is for the
 // same programs as above
 void *dm_bigstack_caller(void *ra);
+#if !defined(__linux__)
 __attribute__((weak, visibility("hidden"))) void *dm_bigstack_caller(void *ra) { return ra; }
+#endif
 
 // Host service sessions (hle_sf.c): a request on a session the host serves, as its service sees it, and the answer it fills in. The input is the raw CMIF data after the "SFCI"
 // header; the buffers are the client's A (send), B (receive) and X (pointer) descriptors, read and written in place (one address space); the output is the raw data after "SFCO",
@@ -98,7 +102,7 @@ typedef Result (*sf_answer)(sf_req *r);
 uint32_t sf_session(const char *name, sf_answer answer, void *ctx, void (*close)(void *ctx));   // a new host session (its handle), for a service to move to its client
 // A service the host serves in its own file: SF_SERVICE("name", answer) registers it (the __DATA,swsf section), and connecting to that name gives a session answered by it
 typedef struct { const char *name; sf_answer answer; } sf_service_ent;
-#define SF_SERVICE(svc, fn) __attribute__((used, section("__DATA,swsf"))) static const sf_service_ent sf_service_##fn = {svc, fn}
+#define SF_SERVICE(svc, fn) __attribute__((used, section("swsf"))) static const sf_service_ent sf_service_##fn = {svc, fn}
 // Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime
 int dm_opmode(void);
 void dm_set_opmode(int m);          // On change, push notification 30 / 31 according to the switches the game has turned on

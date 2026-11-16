@@ -27,10 +27,22 @@ if _libproc is not None:
 
 def members(pgid):
     """[(pid, name)] of the live processes in process group pgid; zombies are not members (they write nothing; the caller or launchd reaps them)"""
-    if _libproc is None:   # another system: only whether the group has a member, no names
-        try: os.killpg(pgid, 0); return [(pgid, '?')]
-        except ProcessLookupError: return []
-        except PermissionError: return [(pgid, '?')]
+    if _libproc is None:   # Linux: /proc/<pid>/stat, field 5 is the process group
+        out = []
+        try: names = os.listdir('/proc')
+        except OSError: return []
+        for name in names:
+            if not name.isdigit(): continue
+            try: stat = open(f'/proc/{name}/stat', errors='replace').read()
+            except OSError: continue
+            close = stat.rfind(')')
+            if close < 0: continue
+            fields = stat[close + 2:].split()
+            if len(fields) < 3 or fields[0] == 'Z': continue
+            try: pg = int(fields[2])
+            except ValueError: continue
+            if pg == pgid: out.append((int(name), stat[stat.find('(') + 1:close]))
+        return out
     buf = (ctypes.c_int * 1024)()
     n = _libproc.proc_listpids(2, pgid, buf, ctypes.sizeof(buf)) // ctypes.sizeof(ctypes.c_int)   # PROC_PGRP_ONLY
     out, info = [], ctypes.create_string_buffer(136)   # struct proc_bsdinfo

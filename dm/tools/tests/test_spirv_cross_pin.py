@@ -1,5 +1,5 @@
 """The in-repo spirv-cross (dm/gfx/tools/spirv_cross_bin, GitHub issue #242): the shader tools run it rather than the one on PATH, the lock records its fingerprint, it is the
-release build.sh pins, it runs on both Mac architectures, and SPIRV-Cross's licences are beside it. No Xcode or game files needed."""
+release build.sh pins, it is a native AArch64 Linux executable, and SPIRV-Cross's licences are beside it. No Xcode or game files needed."""
 import os
 from pathlib import Path
 import re
@@ -33,9 +33,10 @@ class Pin(unittest.TestCase):
         self.assertTrue(os.access(BIN / 'spirv-cross', os.X_OK))
         for f in ('LICENSE', 'LICENSES/Apache-2.0.txt', 'LICENSES/MIT.txt'): self.assertTrue((BIN / f).is_file(), f)
 
-    def test_universal(self):   # an Intel Mac runs it too, as the translator's launcher
-        r = subprocess.run(['lipo', '-archs', str(BIN / 'spirv-cross')], capture_output=True, text=True)
-        self.assertEqual(sorted(r.stdout.split()), ['arm64', 'x86_64'])
+    def test_native_executable(self):
+        data = (BIN / 'spirv-cross').read_bytes()
+        self.assertEqual(data[:4], b'\x7fELF')
+        self.assertEqual(int.from_bytes(data[18:20], 'little'), 183)   # AArch64
 
 
 if __name__ == '__main__':

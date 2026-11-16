@@ -12,11 +12,21 @@
 #include <sched.h>
 #include <time.h>
 #include <stdatomic.h>
+#ifdef __APPLE__
 #include <mach/mach.h>
 #include <TargetConditionals.h>
 #include <CoreFoundation/CoreFoundation.h>   // the volume's free space with what the system can purge (guest_file_free_important)
 #if TARGET_OS_IPHONE
 #include <os/proc.h>   // os_proc_available_memory
+#endif
+#else
+#include "memory/nx_mem.h"
+#include <mach/mach.h>
+#include <linux/falloc.h>
+#include <sys/vfs.h>
+#ifndef MINCORE_MODIFIED
+#define MINCORE_MODIFIED 0x2
+#endif
 #endif
 
 #define SWITCH_ALIAS UINT64_C(0x1000000000)   // a Switch's alias region: 64 GB
@@ -74,7 +84,9 @@ static size_t env_size(const char *name, size_t min, size_t align) {
 // Mac that and 8 GB, as it can swap instead. A file is unlinked before it is sized, so one left behind holds nothing. guest_file_thread stops the game when the room left falls under the minimum later.
 // What the game gives back goes PROT_NONE in the files and its blocks are punched out (guest_release, guest_file_punch; DM_GUEST_FILE_PUNCH=0 keeps them), and it reads 0 when it is opened again
 // (alias_initialize, SetHeapSize)
+#ifdef __APPLE__
 int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);   // libproc.h, which the iOS SDK does not have
+#endif
 #define GF_MAX 1024
 static int g_gf_tab[GF_MAX];       // the files, open for reading and writing
 static int g_gf_n;                 // how many; 0 while the guest is anonymous. Set by mem_init_once, whose pthread_once orders it before every reader
@@ -92,9 +104,14 @@ static void guest_file_punch(uintptr_t lo, uintptr_t hi) {
     while (lo < hi) {
         size_t off = lo - (uintptr_t)g_as, k = off / g_gf_chunk, in = off - k * g_gf_chunk, fsz = (int)k == g_gf_n - 1 ? g_reserve - k * g_gf_chunk : g_gf_chunk;
         size_t len = hi - lo < fsz - in ? hi - lo : fsz - in;
+#ifdef __APPLE__
         fpunchhole_t ph = {0}; ph.fp_offset = (off_t)in; ph.fp_length = (off_t)len;
         if (!fcntl(g_gf_tab[k], F_PUNCHHOLE, &ph)) atomic_fetch_add(&g_gf_punched, len);
         else { static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 4) LOG("[RED] [mem] guest file: F_PUNCHHOLE file %zu +%#zx+%#zx failed (errno %d): the range keeps its disk blocks", k, in, len, errno); }
+#else
+        if (!fallocate(g_gf_tab[k], FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t)in, (off_t)len)) atomic_fetch_add(&g_gf_punched, len);
+        else { static _Atomic int nred; if (atomic_fetch_add(&nred, 1) < 4) LOG("[RED] [mem] guest file: punch hole file %zu +%#zx+%#zx failed (errno %d): the range keeps its disk blocks", k, in, len, errno); }
+#endif
         lo += len;
     }
 }
@@ -141,6 +158,7 @@ static void guest_file_sweep(void);
 // The query asks the system's cache-delete service: 4-65 ms on the Mac, where it gave 14.73 GB for 14.71 of f_bavail (little is purgeable there). -1 when it fails
 static char g_gf_dir[1024];
 static double guest_file_free_important(void) {
+#ifdef __APPLE__
     CFURLRef u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)g_gf_dir, (CFIndex)strlen(g_gf_dir), true);   // a new URL each time: one caches the values it gave
     double r = -1; int64_t x; CFTypeRef v = NULL;
     if (!u) return r;
@@ -149,6 +167,11 @@ static double guest_file_free_important(void) {
         CFRelease(v);
     }
     CFRelease(u); return r;
+#else
+    struct statfs fs;
+    if (!g_gf_dir[0] || statfs(g_gf_dir, &fs)) return -1;
+    return (double)fs.f_bavail * fs.f_bsize;
+#endif
 }
 // Every second the room left on the files' disk (they all lie on one volume): its free space less what the files' dirty pages may take when the kernel writes them out. Under
 // DM_GUEST_FILE_MIN_FREE (default 2G) the game is stopped (exit code 87; the memory watchdog's is 86, hle_nvn.c), before a full disk leaves the kernel no room to write the guest's pages out.
@@ -157,6 +180,7 @@ static double guest_file_free_important(void) {
 // (saves, Metal's shader cache, the system's own files). The room counts f_bavail first; only when that is short does it ask for the free space with what the system can purge
 // (guest_file_free_important, at most every 10 s), and goes on on that while f_bavail's own room stays above half the minimum, since the system purges only as the disk fills.
 // Every 10th second one line, [RED] with under a gigabyte to the minimum: what the disk cost so far and the footprint's parts
+#ifdef __APPLE__
 static void *guest_file_thread(void *arg) {
     (void)arg; const double G = 1073741824.0; size_t pg = (size_t)getpagesize(); char *vec = malloc(g_reserve / pg + 1);
     const char *sc = getenv("DM_GUEST_FILE_SCAN"); int scan = sc && atoi(sc) > 0, purge_told = 0;
@@ -197,6 +221,10 @@ static void *guest_file_thread(void *arg) {
     }
     return NULL;
 }
+#else
+static void *guest_file_thread(void *arg) { (void)arg; LOG("[RED] [mem] DM_GUEST_FILE is an iOS memory-limit feature and is not implemented on Linux; the guest stays anonymous"); return NULL; }
+#endif
+
 // The host's own memory to come, which the room at start (os_proc_available_memory, read before the game runs) has to hold beside the guest's pages: mostly graphics memory, Metal's
 // copies of the game's textures (Metal cannot sample the guest's block-linear storage), render targets and upload staging, then malloc. It follows what the game keeps in its pool, from
 // a tenth of the pool to all of it, while the guest touches only part of its pool; what has to fit is the two together. Their peak against the pool, measured with the guest in files (which
@@ -213,7 +241,13 @@ static uint64_t guest_host_margin(uint64_t pool) {
 }
 // Whether the guest goes in files: DM_GUEST_FILE when it is set, otherwise when the game's memory pool and the host's margin (guest_host_margin) do not fit the room to the memory limit
 // (room 0: no limit known, as on the Mac)
-static int guest_file_wanted(const char *e, uint64_t pool, uint64_t host, uint64_t room) { return e && *e ? atoi(e) > 0 : room && pool + host > room; }
+static int guest_file_wanted(const char *e, uint64_t pool, uint64_t host, uint64_t room) {
+#ifdef __APPLE__
+    return e && *e ? atoi(e) > 0 : room && pool + host > room;
+#else
+    (void)e; (void)pool; (void)host; (void)room; return 0;
+#endif
+}
 // A new file of this process's own, never a link's target (O_EXCL, O_NOFOLLOW): one a dead process with the same number left is replaced
 static int guest_file_open(const char *path) {
     const int fl = O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC;
@@ -279,6 +313,7 @@ static int guest_files_map(const char *dir, size_t chunk, int n, struct statfs *
     if (mmap(g_as, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) != g_as) die("reserve guest AS again after DM_GUEST_FILE (errno %d)", errno);   // whatever the maps left there
     return 0;
 }
+#ifdef __APPLE__
 static void guest_file_init(void) {
     const double G = 1073741824.0; const char *e = getenv("DM_GUEST_FILE"), *d = getenv("DM_GUEST_FILE_DIR"), *mf = getenv("DM_GUEST_FILE_MIN_FREE");
 #if TARGET_OS_IPHONE
@@ -311,6 +346,9 @@ static void guest_file_init(void) {
     if (!rc) pthread_detach(th);
     else LOG("[RED] [mem] guest file: no thread to watch it (error %d): no 10-s line, and nothing stops the game when its disk fills", rc);
 }
+#else
+static void guest_file_init(void) { const char *e = getenv("DM_GUEST_FILE"); if (e && *e) LOG("[RED] [mem] DM_GUEST_FILE is an iOS memory-limit feature and is not implemented on Linux; the guest stays anonymous"); }
+#endif
 
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);
@@ -955,8 +993,15 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // The address lies in "the current host thread's stack": report the whole stack (state 0xB = stack). When the SDK initializes the main thread record it queries here with the sp at that moment and takes the reported range as the main thread stack;
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
+#ifdef __APPLE__
             uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
-            if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
+#else
+            uint64_t top = 0, ssz = 0;
+            { pthread_attr_t a; void *sb = NULL; size_t sz = 0;
+              if (!pthread_getattr_np(pthread_self(), &a) && !pthread_attr_getstack(&a, &sb, &sz)) { top = (uint64_t)(uintptr_t)sb + sz; ssz = sz; }
+              pthread_attr_destroy(&a); }
+#endif
+            if (top && addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
             // Other host memory: report "free, no permissions" (the 4 KiB page around it) as Horizon does for unmapped addresses. It used to report Code+RX, and GetExceptionInfo walking back from main merged on through host memory down to 0
             else { base=addr & ~0xFFFull; size=0x1000; state=0/*Free*/; perm=0; } }
         map_source_query(addr, &base, &size, &attr, &perm);

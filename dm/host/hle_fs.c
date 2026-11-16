@@ -14,10 +14,25 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdatomic.h>
-#include <sys/clonefile.h>
 #include <sys/xattr.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#ifndef __APPLE__
+#include <sys/xattr.h>
+#ifndef XATTR_NOFOLLOW
+#define XATTR_NOFOLLOW 0x1
+#endif
+#ifndef ENOATTR
+#define ENOATTR ENODATA
+#endif
+static ssize_t fs_getxattr(const char *p, const char *n, void *v, size_t s, uint32_t pos, int opt) { (void)pos; return (opt & XATTR_NOFOLLOW) ? lgetxattr(p, n, v, s) : getxattr(p, n, v, s); }
+static int fs_setxattr(const char *p, const char *n, const void *v, size_t s, uint32_t pos, int opt) { (void)pos; return (opt & XATTR_NOFOLLOW) ? lsetxattr(p, n, v, s, 0) : setxattr(p, n, v, s, 0); }
+static int fs_removexattr(const char *p, const char *n, int opt) { return (opt & XATTR_NOFOLLOW) ? lremovexattr(p, n) : removexattr(p, n); }
+#else
+#define fs_getxattr getxattr
+#define fs_setxattr setxattr
+#define fs_removexattr removexattr
+#endif
 
 #define RES_PATH_NOT_FOUND 0x202u      // fs module 2, description 1
 #define RES_PATH_EXISTS    0x402u      // fs module 2, description 2
@@ -284,7 +299,7 @@ static int guest_name(const char *parent, const char *physical, char *out, size_
     // so no per-entry getxattr is needed -- that was one system call per entry when listing, seconds for the 216,000 entries Engage walks in RomFS at boot
     if (strncmp(physical, ".dm-case-", 9)) { strlcpy(out, physical, n); return 1; }
     char p[1280]; snprintf(p, sizeof p, "%s/%s", parent, physical);
-    ssize_t k = getxattr(p, FS_GUEST_NAME, out, n - 1, 0, XATTR_NOFOLLOW);
+    ssize_t k = fs_getxattr(p, FS_GUEST_NAME, out, n - 1, 0, XATTR_NOFOLLOW);
     if (k >= 0) { out[k] = 0; return 1; }
     if (errno != ENOATTR) return 0;
     strlcpy(out, physical, n); return 1;
@@ -457,8 +472,8 @@ static int set_guest_name(const char *hp, const char *path) {
     if (k >= sizeof guest) { errno = ENAMETOOLONG; return -1; }
     memcpy(guest, start, k); guest[k] = 0;
     const char *physical = strrchr(hp, '/') + 1;
-    if (strcmp(physical, guest)) return setxattr(hp, FS_GUEST_NAME, guest, strlen(guest), 0, XATTR_NOFOLLOW);
-    if (!removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == ENOATTR) return 0;
+    if (strcmp(physical, guest)) return fs_setxattr(hp, FS_GUEST_NAME, guest, strlen(guest), 0, XATTR_NOFOLLOW);
+    if (!fs_removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == ENOATTR) return 0;
     return -1;
 }
 // Hosts before fwd_slashes took a backslash in a save path as part of the name: save:\savedata0.bin is the file "\savedata0.bin", and save:\dir\f the file "\dir\f" in the save's root.
@@ -1110,9 +1125,14 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
                 static _Atomic int once; if (!once++) LOG("[fs] ReadFile into %p+%#zx: the destination was write-protected again during the read, prepared again at +%#zx (first case)", buf, sz, got);
                 dm_guest_write_prepare((uint8_t *)buf + got, sz - got); continue; }
             if (errno == EFAULT) {   // the destination is not writable host memory: say where, with the protection of its VM region
-                int e = errno; vm_address_t ra = (vm_address_t)((uint8_t *)buf + got); vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+                int e = errno;
+#ifdef __APPLE__
+                vm_address_t ra = (vm_address_t)((uint8_t *)buf + got); vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
                 kern_return_t kr = vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj);
                 LOG("[RED] fs ReadFile into %p+%#zx failed at +%#zx (EFAULT): VM region %#lx+%#lx protection %d%s", buf, sz, got, (unsigned long)ra, (unsigned long)rs, kr == KERN_SUCCESS ? vi.protection : -1, kr == KERN_SUCCESS ? "" : " (none)");
+#else
+                LOG("[RED] fs ReadFile into %p+%#zx failed at +%#zx (EFAULT): destination is not writable host memory", buf, sz, got);
+#endif
                 errno = e; }
             return err_res("pread", "fd"); }
         if (r == 0) break;

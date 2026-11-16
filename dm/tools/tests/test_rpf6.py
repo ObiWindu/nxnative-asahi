@@ -81,6 +81,7 @@ class Archive(unittest.TestCase):
         self.assertEqual(rpf6.joaat('a'), 0xca2e9442)   # Jenkins one-at-a-time of "a"
         self.assertEqual(rpf6.joaat('Shaders.RPF'), rpf6.joaat('shaders.rpf'))   # lower-cased first
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'CommonCrypto fixture')
     def test_header(self):
         archive(self.path)
         self.assertEqual(rpf6.header(self.path), (5, 0x10 + 0x70, True))
@@ -89,6 +90,7 @@ class Archive(unittest.TestCase):
         Path(self.path).write_bytes(b'RPF6')
         self.assertIsNone(rpf6.header(self.path))   # shorter than a header
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'CommonCrypto fixture')
     def test_decrypt_round_trip(self):
         blk = struct.pack('>4I', 0, 0, 0x80000001, 2)
         self.assertTrue(rpf6.is_root(rpf6.decrypt(KEY, encrypt(KEY, blk))))
@@ -96,7 +98,7 @@ class Archive(unittest.TestCase):
         self.assertEqual(len(rpf6.decrypt(KEY, bytes(40))), 32)   # whole blocks only
 
     def test_entry_table_and_names(self):
-        for encrypted in (True, False):
+        for encrypted in ((True, False) if sys.platform == 'darwin' else (False,)):
             with self.subTest(encrypted=encrypted):
                 archive(self.path, encrypted=encrypted)
                 r = rpf6.Rpf(self.path, KEY)
@@ -111,6 +113,7 @@ class Archive(unittest.TestCase):
                     self.assertEqual(r.read(f, files['dir/b.bin'], Zlib), b'x' * 300)
                     self.assertEqual(r.read(f, files['dir/r.wtx'], Zlib), b'resource data')
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'CommonCrypto fixture')
     def test_wrong_key_is_an_error(self):
         archive(self.path)
         with self.assertRaisesRegex(ValueError, 'no root directory'):

@@ -1,19 +1,24 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
+#ifdef __APPLE__
 #include <TargetConditionals.h>
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+#if TARGET_OS_IPHONE
+#include <mach/mach.h>
+#endif
+#else
+#define TARGET_OS_IPHONE 0
+#endif
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
+#include <sys/uio.h>
 #include "hle.h"
-#if TARGET_OS_IPHONE
-#include <mach/mach.h>
-#endif
 
 module_t *g_mod;
 int g_nmod;
@@ -22,12 +27,13 @@ static module_t **g_loaded; static int g_nloaded, g_mod_capacity;
 static pthread_rwlock_t g_modules_mu = PTHREAD_RWLOCK_INITIALIZER;
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_N };
+static uint64_t g_key_off[KEY_N];   // byte offset from tpidr_el0/tpidrro_el0 to the key's data slot
 
 uint64_t resolve_import(module_t *m, const char *name);
 int hle_implements(const char *name);
 void gate_register(uint64_t ret_addr, const char *kind, int arg, uint64_t orig);
 
-static pthread_key_t key_value(unsigned i) {
+__attribute__((unused)) static pthread_key_t key_value(unsigned i) {
     switch (i) {
     case KEY_K18: return g_key18; case KEY_KTLS: return g_keytls; case KEY_KTLR: return g_keytlr;
     default: return g_keygate;
@@ -37,14 +43,55 @@ static void create_keys(void) {
     if (pthread_key_create(&g_key18, NULL) || pthread_key_create(&g_keytls, NULL) ||
         pthread_key_create(&g_keytlr, NULL) || pthread_key_create(&g_keygate, NULL)) die("cannot create the host key");
     LOG("key numbers K18=%lu KTLS=%lu KTLR=%lu KGATE=%lu", g_key18, g_keytls, g_keytlr, g_keygate);
+#ifdef __APPLE__
+    /* Darwin's TSD is the documented slot array at tpidrro_el0 + 8*key. */
+    pthread_key_t k[KEY_N] = {g_key18, g_keytls, g_keytlr, g_keygate};
+    for (int i = 0; i < KEY_N; i++) g_key_off[i] = (uint64_t)k[i] * 8;
+#else
+    /* glibc's struct pthread keeps specific_1stblock as 16-byte entries
+       (seq, data). The guest's rewritten sequences want a byte offset from
+       tpidr_el0, so discover the block from a unique marker and verify every
+       slot instead of assuming a layout. */
+    uint64_t base; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(base));
+    const uint64_t marker = 0x9e3779b97f4a7c15ull;
+    if (pthread_setspecific(g_key18, (void *)(uintptr_t)marker)) die("pthread_setspecific(K18) failed");
+    uint64_t slot = 0;
+    /* glibc's TCB may put the key block before or after tpidr_el0; read
+       through /proc-safe process_vm_readv so an unmapped page cannot fault. */
+    for (int64_t off = -0x20000; off <= 0x20000; off += 8) {
+        uint64_t v = 0, addr = base + (uint64_t)off;
+        struct iovec l = {&v, sizeof v}, r = {(void *)(uintptr_t)addr, sizeof v};
+        if (process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)sizeof v && v == marker) { slot = addr; break; }
+    }
+    if (!slot) die("cannot find the pthread TSD slot for K18 on this libc");
+    int64_t block = (int64_t)slot - (int64_t)g_key18 * 16 - 8;
+    pthread_key_t k[KEY_N] = {g_key18, g_keytls, g_keytlr, g_keygate};
+    for (int i = 0; i < KEY_N; i++) {
+        uint64_t want = marker ^ (uint64_t)(i + 1) * 0x100000001b3ull;
+        if (pthread_setspecific(k[i], (void *)(uintptr_t)want)) die("pthread_setspecific(key %d) failed", i);
+        uint64_t at = (uint64_t)block + (uint64_t)k[i] * 16 + 8;
+        uint64_t got; memcpy(&got, (const void *)(uintptr_t)at, sizeof got);
+        if (got != want) die("pthread TSD layout: key %d is not at the first-block slot (found %#llx, wanted %#llx)", i, (unsigned long long)got, (unsigned long long)want);
+        g_key_off[i] = at - base;
+    }
+    for (int i = 0; i < KEY_N; i++) pthread_setspecific(k[i], NULL);
+    LOG("TSD slots: K18=%#llx KTLS=%#llx KTLR=%#llx KGATE=%#llx (glibc first block, base %p)",
+        (unsigned long long)g_key_off[0], (unsigned long long)g_key_off[1], (unsigned long long)g_key_off[2],
+        (unsigned long long)g_key_off[3], (void *)(uintptr_t)base);
+#endif
 }
 
 // K slot check: the pthread TSD layout is fixed, slot = tpidrro_el0 + 8*key
 static void tsd_check(void) {
     pthread_setspecific(g_key18, (void *)0x1234);
-    uint64_t base; __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    uint64_t base;
+#ifdef __APPLE__
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+#else
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(base));
+#endif
     uint64_t off = *(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8);
-    if (((uint64_t *)(base & ~7ull))[off / 8] != 0x1234) die("TSD layout mismatch");
+    if (*(uint64_t *)(uintptr_t)(base + off) != 0x1234) die("TSD layout mismatch");
     pthread_setspecific(g_key18, 0);
 }
 
@@ -214,8 +261,13 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
 static void force_init(void) {
+#ifdef __APPLE__
     unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
+#else
+    { extern const hle_force_ent __start_swforce[], __stop_swforce[];
+      g_force = __start_swforce; g_nforce = (unsigned)(__stop_swforce - __start_swforce); }
+#endif
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
     g_fidx = calloc(cap, sizeof *g_fidx); g_fmask = cap - 1;
@@ -389,7 +441,7 @@ static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);
     uint64_t *page = (uint64_t *)(m->base + m->key_page_off);
     memset(page, 0, m->key_page_size);
-    for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = (uint64_t)key_value(i) * 8;
+    for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = g_key_off[i];
     for (int k = 0; k < KEY_N; k++) if (!page[m->key_idx[k]]) die("%s: key page entry %d is 0 (host key not created) -- the game would read TSD slot 0", m->name, k);
     if (mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
     if (m->fps_state_off) install_fps_state(m);

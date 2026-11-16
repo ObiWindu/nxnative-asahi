@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=nxnative
+Comment=Native Nintendo Switch runtime for Asahi Linux
+Exec=nxnative-launcher
+Terminal=false
+Categories=Game;Emulator;
+Keywords=Switch;Nintendo;Emulator;Asahi;

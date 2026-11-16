@@ -1209,8 +1209,8 @@ def reused(keyfile, key):   # the note the stage's last successful run wrote bes
     return note.strip() if k == key else None
 
 
-def tool_files(repo):   # what the shader stages run: dm/gfx/tools' scripts and the lock of the translator's fingerprints, the profile reader, the iOS compile convention, the RomFS reader, the code module loader
-    return sorted((repo / 'dm/gfx/tools').glob('*.py')) + [repo / p for p in ('dm/gfx/tools/dmsh_chain.lock', 'dm/games/game.py', 'dm/ios/tools/ios_metal.py', 'dm/tools/romfs.py', 'dm/tools/nso.py')]
+def tool_files(repo):   # what the shader stages run: dm/gfx/tools' scripts and the lock of the translator's fingerprints, the profile reader, the RomFS reader, the code module loader
+    return sorted((repo / 'dm/gfx/tools').glob('*.py')) + [repo / p for p in ('dm/gfx/tools/dmsh_chain.lock', 'dm/games/game.py', 'dm/tools/romfs.py', 'dm/tools/nso.py')]
 
 
 def python_tool_files(repo, entry, roots):   # transitive repository imports, including imports inside reader functions; unrelated tools are not inputs
@@ -1229,8 +1229,8 @@ def translator_key(xlate):   # the translator by its bytes alone: a checkout tha
     return ('files', [xlate])
 
 
-def chain_files(repo):   # what the iOS shaders run: not the split's readers (shader_split.py, unityfs.py, uepak.py)
-    return python_tool_files(repo, 'dm/gfx/tools/dmsh_build.py', ('dm/gfx/tools', 'dm/ios/tools', 'dm/games')) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
+def chain_files(repo):   # what the shader build runs: not the split's readers (shader_split.py, unityfs.py, uepak.py)
+    return python_tool_files(repo, 'dm/gfx/tools/dmsh_build.py', ('dm/gfx/tools', 'dm/games')) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
 
 
 SPLIT_TABLES = ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')   # the profile tables the split reads or is checked against (derive_profile keys on them too)
@@ -1481,7 +1481,14 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
 def build_mismatch(d, name, g):   # the modules of an extraction whose build ID is not the one the profile's build row of that version registers ([] = the registered build)
     want = g.builds().get(name)
     if want is None: return [f'{name} has no build row']
-    return [f'{m} {build_id(d / "ExeFS" / m)} (registered {bid})' for m, bid in want.items() if m != 'display' and build_id(d / 'ExeFS' / m) != bid]
+    out = []
+    for m, bid in want.items():
+        if m == 'display': continue
+        p = d / 'ExeFS' / m
+        if not p.is_file(): out.append(f'{m} missing (registered {bid})'); continue
+        got = build_id(p)
+        if got != bid: out.append(f'{m} {got} (registered {bid})')
+    return out
 
 
 def patch_files(repo, exe_dir, mods, game_id=None):
@@ -2417,8 +2424,10 @@ def spirv_cross(repo, env=None):   # resolve the same selection the shader tools
 
 
 def toolchain(repo, env=None):   # Metal is a separate Xcode download: its version and SDK must invalidate reuse too
+    if sys.platform != 'darwin':
+        return (('files', [spirv_cross(repo, env)]),)   # Asahi builds SPIR-V; no Metal compiler
     return (('cmd', ['xcodebuild', '-version']), ('files', [spirv_cross(repo, env)]),
-            *(('cmd', ['xcrun', '-sdk', sdk, *args]) for sdk in ('macosx', 'iphoneos')
+            *(('cmd', ['xcrun', '-sdk', sdk, *args]) for sdk in ('macosx',)
               for args in (['metal', '--version'], ['metallib', '--version'], ['--show-sdk-version'], ['--show-sdk-build-version'])))
 
 
@@ -2530,7 +2539,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     silence on a shader the partial build never saw as proof it is safe (no chain_tables, no shader_regressions, no pruning; the host logs the missing stamp in red at each start)
     pull: an iPhone build's ios_wants_pulling. False neither compiles the pulling libraries nor keeps them in its image; True does not reuse an image without them"""
     ios, log = sh / 'ios', logs / 'dmsh_build.log'
-    PROG.stage('Mac shaders' if mac else 'iOS shaders')
+    PROG.stage('Shaders' if mac else 'iOS shaders')
     chain = chain_of(repo)
     shader_cache.adopt(sh / 'cache/cas', shader_cache.chain_file(sh / 'cache', chain), say)
     out = sh / 'partial' if seen else sh / 'cache' if mac else ios
@@ -2585,8 +2594,9 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     PROG.watch(None)
     if not seen and not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
     what = 'Mac' if mac else 'iOS'
-    n = sum(1 for _ in shader_lib.view(libs).glob('*_b.metallib')) if shader_lib.exists(libs) else 0   # the image dmsh_build.py writes (a folder from an older chain)
-    if n == 0: raise BuildError(f'no {what} shader libraries in {libs}')
+    ext = '*_b.spv' if sys.platform != 'darwin' else '*_b.metallib'   # Asahi builds SPIR-V, not Metal libraries
+    n = sum(1 for _ in shader_lib.view(libs).glob(ext)) if shader_lib.exists(libs) else 0   # the image dmsh_build.py writes (a folder from an older chain)
+    if n == 0: raise BuildError(f'no shader libraries in {libs}')
     say(f'{n} {what} shader libraries ({libs})')
     if keep_mac: say(f'{sum(1 for _ in shader_lib.view(sh / "cache" / f"b-{chain}").glob("*_b.metallib"))} Mac shader libraries kept for the Mac run command ({sh / "cache" / f"b-{chain}"})')
     t = log.read_text(errors='replace')

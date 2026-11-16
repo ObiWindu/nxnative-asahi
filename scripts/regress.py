@@ -863,10 +863,12 @@ def run_heavy(cmd, log, cwd, env, a, what):
 
 # ---------------------------------------------------------------- one game run
 
-_libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+try: _libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+except OSError: _libproc = None   # Asahi Linux has no libproc; footprint is a macOS measurement
 
 
 def footprint(pid):   # (current, lifetime peak) physical footprint in bytes (proc_pid_rusage, RUSAGE_INFO_V4)
+    if _libproc is None: return None
     buf = ctypes.create_string_buffer(512)
     if _libproc.proc_pid_rusage(pid, 4, buf) != 0: return None
     v = struct.unpack_from('<16x35Q', buf.raw)

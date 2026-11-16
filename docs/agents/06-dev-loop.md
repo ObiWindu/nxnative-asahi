@@ -96,7 +96,6 @@ Co-authored-by: …
   | `chain` | The shader chain (`DMSH_CHAIN`'s files; the `shader chain` label): every game's shaders are rebuilt |
   | `rewriter` | The NSO rewriter and per-build patches (`patch_nso.py`, `sdk_patches.py`, a profile's `patches.py`) |
   | `packing` | The NSP script, extraction, the shader split, the packers |
-  | `ios` | The iPhone and iPad app (`dm/ios`) |
   | `mac` | The Mac front end and app (`dm/mac`, `front_mac.m`) |
   | `tools` | Tools and scripts (`dm/tools`, `scripts`) |
   | `docs` | Documentation, when the commit is nothing else |

@@ -1,7 +1,11 @@
 // Import resolution (implemented ones go to the host, the rest go to named stubs) and host gate dispatch.
 #include "hle.h"
+#ifdef __APPLE__
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
+#else
+#include "graphics/vkapi/vk_api.h"
+#endif
 #include <dlfcn.h>
 #include <time.h>
 
@@ -31,9 +35,15 @@ static uint32_t name_h(const char *s) { uint32_t h = 2166136261u; while (*s) h =
 static unsigned *g_hle_idx, g_hle_mask; static const hle_ent *g_hle_sec;
 static const hle_ent *hle_find(const char *name) {
     if (!g_hle_mask) {
+#ifdef __APPLE__
         unsigned long secsz;
         g_hle_sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
         unsigned n = g_hle_sec ? (unsigned)(secsz / sizeof *g_hle_sec) : 0;
+#else
+        extern const hle_ent __start_swhle[], __stop_swhle[];
+        g_hle_sec = __start_swhle;
+        unsigned n = (unsigned)(__stop_swhle - __start_swhle);
+#endif
         unsigned cap = 16; while (cap < n * 2) cap <<= 1;
         g_hle_idx = calloc(cap, sizeof *g_hle_idx); g_hle_mask = cap - 1;
         for (unsigned i = 0; i < n; i++)   // the first entry of a duplicated name wins, as the linear scan did
@@ -49,6 +59,10 @@ static const hle_ent *hle_find(const char *name) {
 }
 
 uint64_t resolve_import(module_t *m, const char *name) {
+    if (!strncmp(name, "vk", 2)) {
+        void *p = nx_vkapi_lookup(name);
+        if (p) return (uint64_t)p;
+    }
     const hle_ent *e = hle_find(name);
     if (e) {
         if (g_flag.imports) { Dl_info di; dladdr(e->fn, &di); LOG("import %s -> %s", name, di.dli_sname); }
@@ -79,7 +93,7 @@ uint64_t resolve_import(module_t *m, const char *name) {
 }
 
 // The host implements this import (the swhle table), without allocating a stub for it
-int hle_implements(const char *name) { return hle_find(name) != NULL; }
+int hle_implements(const char *name) { return hle_find(name) != NULL || (!strncmp(name, "vk", 2) && nx_vkapi_lookup(name) != NULL); }
 
 void stubs_report(void) { LOG("stubs=%u", g_nstub); }
 

@@ -7,11 +7,15 @@
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
 #include <errno.h>
-#include <TargetConditionals.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
 #if !TARGET_OS_IPHONE
 #include <crt_externs.h>
 #include <mach-o/dyld.h>
+#endif
+#else
+extern char **g_host_argv;
 #endif
 static _Atomic int g_opmode = -1;
 int dm_opmode(void) {
@@ -211,10 +215,18 @@ static int prog_plan_make(char **rows, int nr, int hit, prog_plan *out, const vo
         if (!out->exe || !arg || !out->cwd) { LOG("[RED] %s: DM_PROGRAMS's row of program %d lacks exe=, arg= or cwd=", call, prog); return 0; }
         out->argv2[0] = (char *)out->exe; out->argv2[1] = (char *)arg; out->argv = out->argv2; dir = out->cwd;
     } else {
+#ifdef __APPLE__
         uint32_t sz = sizeof out->self;
         if (_NSGetExecutablePath(out->self, &sz)) { LOG("[RED] %s: the host's path does not fit", call); return 0; }
         if (!relaunch && !getcwd(here, sizeof here)) { LOG("[RED] %s: no current folder", call); return 0; }
         out->exe = out->self; out->argv = *_NSGetArgv();   // main leaves its argv as it was given, and the host never changes folder
+#else
+        ssize_t nself = readlink("/proc/self/exe", out->self, sizeof out->self - 1);
+        if (nself <= 0) { LOG("[RED] %s: cannot read /proc/self/exe", call); return 0; }
+        out->self[nself] = 0;
+        if (!relaunch && !getcwd(here, sizeof here)) { LOG("[RED] %s: no current folder", call); return 0; }
+        out->exe = out->self; out->argv = g_host_argv;
+#endif
     }
     if (relaunch) env[k++] = "DM_RELAUNCH=1";
     else {

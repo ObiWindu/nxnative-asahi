@@ -18,11 +18,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/clonefile.h>
 #include <sys/stat.h>
-#include <sys/sysctl.h>
 #include <sys/xattr.h>
 #include <time.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #define SLOG(...) do { fprintf(stderr, "[dm] save sync: " __VA_ARGS__); fputc('\n', stderr); } while (0)
@@ -102,9 +101,17 @@ static void when(int64_t t, char *out, size_t n) {   // a save's time in the log
 }
 
 static void device_name(char *out, size_t n) {   // the model ("Mac16,1", "iPhone17,1"): which device a save came from, for the log
+#ifdef __APPLE__
     char model[64] = ""; size_t len = sizeof model;
     if (sysctlbyname(TARGET_OS_OSX ? "hw.model" : "hw.machine", model, &len, NULL, 0)) model[0] = 0;
     snprintf(out, n, "%s", model[0] ? model : "unknown");
+#else
+    char model[96] = "";
+    FILE *f = fopen("/proc/device-tree/model", "rb");
+    if (f) { size_t k = fread(model, 1, sizeof model - 1, f); fclose(f); while (k && (model[k-1] == '\n' || model[k-1] == 0)) model[--k] = 0; }
+    if (!model[0]) { struct utsname u; if (!uname(&u)) snprintf(model, sizeof model, "%s %s", u.sysname, u.machine); }
+    snprintf(out, n, "%s", model[0] ? model : "unknown");
+#endif
 }
 
 static void upper_title(const char *title, char *out, size_t n) {   // one spelling of the title ID in the cloud, whoever packed the app
@@ -116,7 +123,12 @@ static void upper_title(const char *title, char *out, size_t n) {   // one spell
 typedef struct { CC_SHA256_CTX sha; FILE *out; ss_meta *m; uint32_t entries; uint8_t buf[CHUNK]; } packer;
 
 static int pack_entry(packer *k, const char *abs, const char *rel, const struct stat *st) {
-    char guest[1024]; ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
+    char guest[1024];
+#ifdef __APPLE__
+    ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
+#else
+    ssize_t gl = lgetxattr(abs, GUEST_NAME, guest, sizeof guest);
+#endif
     if (gl < 0) gl = 0;   // ENOATTR: the host name is the guest's
     size_t pl = strlen(rel); int file = S_ISREG(st->st_mode);
     if (pl > UINT16_MAX) return -1;
@@ -231,7 +243,11 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
                 *strrchr(out, '/') = 0; int made = mkdirs(out); out[strlen(out)] = '/';
                 if (made || (fd = open(out, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0) goto done;
             }
+#ifdef __APPLE__
             if (gl && setxattr(out, GUEST_NAME, guest, gl, 0, XATTR_NOFOLLOW)) goto done;
+#else
+            if (gl && lsetxattr(out, GUEST_NAME, guest, gl, 0)) goto done;
+#endif
         }
         for (uint64_t left = size; left; ) {
             size_t k = left < CHUNK ? (size_t)left : CHUNK;

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # Route B offline build: original Switch shaders → SPIR-V (dmsh_xlate, the Ryujinx translator) → spirv-cross MSL → metallib + replay reflection JSON.
-# No translation at runtime (iOS has no JIT): build output goes into the shader cache directory, file name = Switch control segment key (dm_ctl_sha16, same as column 4 of shader_map.tsv) + "_b".
+# The Asahi host does no shader translation at run time: build output goes into the shader cache directory, file name = Switch control segment key (dm_ctl_sha16, same as column 4 of shader_map.tsv) + "_b".
 # Source of query answers: the answer table in the game profile, dm/games/<id>/shader_facts.tsv (dmsh_facts.py) - texture types, vertex attribute / fragment output component types, compute thread group size and shared memory.
-# Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is the image <output cache dir>/b-<chain version>.img (same for IOSOUT; dm/tools/shader_lib.py), for the chain version see dmsh_chain.py.
+# Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is the image <output cache dir>/b-<chain version>.img (dm/tools/shader_lib.py), for the chain version see dmsh_chain.py.
 # The folder b-<chain version>/ beside it holds only the shaders in flight: a finished shader's files go into the shader cache (cas-<chain>.db, under stage/), and the image is written from there
 # at the end (publish_library), so a build, stopped or not, leaves a few files and not one per shader output (Octopath Traveler 0, stopped in its compile: 68,230 files). The translator's
 # working files go into a folder per batch of shaders, removed when the batch is done; a working folder whose build is gone is removed at the next start (sweep_work).
 # A full build (no keys) also stamps both directories with the game and the digest of its profile inputs (inputs.tsv) and writes the profile's c1_full.tsv and cb_extent.tsv (c1_guard.py, cb_extent.py)
-# from its Mac outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the compile cache (shader_cache.py): a folder, whose cas-<chain>.db this build writes (default the output cache dir), or one file, DMSH_PREFILL=Mac library root[=iOS library root] (separated by :, their b-*/ go into the MSL-keyed compile cache first; sibling b-*/ always do), J=concurrency, DMSH_PROCS=processes that finish shaders (default J; 0 = threads of this process, see fin_worker)
+# from its outputs. One output directory per game: the chain version is the same for every game   Environment: DM_GAME=game profile (required, dm/games/<id>), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=the output cache (shader_cache.py): a folder, whose cas-<chain>.db this build writes (default the output cache dir), or one file, J=concurrency, DMSH_PROCS=processes that finish shaders (default J; 0 = threads of this process, see fin_worker)
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
-# Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
+# Environment DMSH_SPIRV_ONLY=1: build only the Vulkan SPIR-V and reflection (the Asahi default on Linux); no Metal compile, no Metal libraries
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
@@ -17,7 +17,7 @@ import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_re
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -28,20 +28,13 @@ XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate')
 SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
 if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[RED] no answer table {dmsh_facts.TABLE} (it comes with the game profile; an empty table = every query answered with defaults)')
-IOSOUT = os.environ.get('IOSOUT')   # destination for requested iOS libraries (iphoneos metallib + reflection)
-# Which metallibs this run builds: DMSH_TARGETS=mac,ios (default: both when IOSOUT is set, else mac). The Mac
-# sources and reflection are written even when 'mac' is left out (the profile's c1_full / cb_extent tables are
-# made from them), so an iOS-only build skips only the macOS compile, about half of the Metal work.
-TARGETS = {t.strip() for t in (os.environ.get('DMSH_TARGETS') or ('mac,ios' if IOSOUT else 'mac')).split(',') if t.strip()}
-if not TARGETS or not TARGETS <= {'mac', 'ios'}: sys.exit(f'[RED] DMSH_TARGETS takes mac and/or ios: {",".join(sorted(TARGETS)) or "empty"}')
-if 'ios' in TARGETS and not IOSOUT: sys.exit('[RED] DMSH_TARGETS asks for iOS libraries without IOSOUT')
-if 'ios' not in TARGETS: IOSOUT = None   # every side library, cache, cleanup and stamp follows the same selection
-IOS_PULL = os.environ.get('DMSH_IOS_PULL') != '0'   # DMSH_IOS_PULL=0: no iOS pulling libraries, when nothing in the app reads them (the NSP script's ios_wants_pulling). The reflection is the same: its 'pull' comes from the variant, not from the compile
-if IOSOUT:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
-    IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
+# Asahi Linux builds only SPIR-V. Metal compilation, the iOS/iPhone library
+# targets and the Metal compile cache were removed from this fork. The MSL that
+# SPIRV-Cross emits is still used as the reflection intermediate (the
+# binding/type analysis reads it), but nothing compiles it.
+SPIRV_ONLY = True
 import shader_lib, romfs   # dm/tools (on the path shader_regressions puts it): the library's image, which this build writes (publish_library)
-for _d in [out] + ([IOSOUT] if IOSOUT else []):   # one chain version serves every game, so b-<V>/ alone does not keep two games' libraries apart
+for _d in [out]:   # one chain version serves every game, so b-<V>/ alone does not keep two games' libraries apart
     _g = shader_lib.read_stamp(_d).get('game')
     if _g and _g != GAME.id: sys.exit(f'[RED] {_d} holds the shader libraries of game {_g}, not {GAME.id}: give each game its own output directory')
 MAP = str(GAME.table('shader_map.tsv'))
@@ -56,23 +49,10 @@ STORE: 'shader_cache.Store | shader_cache.Remote' = shader_cache.for_chain(_cas,
 atexit.register(STORE.close)   # folds its log into the one file
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
-# The Mac compile is dmsh_chain.MAC_METAL (each flag's reason there)
-MAC_RECORD = ' '.join(dmsh_chain.MAC_METAL) + '; xcrun -sdk macosx metallib'
-# The compiles run the tools xcrun names, found once: each xcrun launch looks them up again, about 4 ms of a compile's two launches (8 ms a shader). -isysroot is what xcrun -sdk passes
-# (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
-# MAC_RECORD names the xcrun command, which runs the same compiler
-def xcrun_out(*args): return subprocess.run(['xcrun', '-sdk', 'macosx', *args], capture_output=True, text=True, check=True).stdout.strip()
-MAC_RUN = [xcrun_out('-f', 'metal'), '-isysroot', xcrun_out('--show-sdk-path'), *dmsh_chain.MAC_METAL[4:]]
-MAC_LINK = [xcrun_out('-f', 'metallib')]
-# -fbracket-depth: the front end stops at 256 nested brackets ("bracket nesting level exceeded maximum of 256"). Ocarina of Time's compute shaders 1f78730053feb036 and e172bd7ec218ab8e
-# (3.5 MB of MSL each) nest 259 deep in one expression and were left out. A source within the default limit compiles to the same bytes with it (checked on macOS and iOS), so, like the
-# precompiled header, the records do not name it and the Metal cache keeps its libraries. ios_metal.DEPTH is the same
-METAL_DEPTH = ['-fbracket-depth=1024']
-# The outer shader cache restores compiled libraries directly, before the MSL compile cache can check their compiler. Keep override builds separate there too.
-METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
-def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the precompiled header and METAL_DEPTH change no output, so MAC_RECORD does not name them (dmsh_pch.py)
-    dmsh_pch.compile(MAC_RUN + METAL_DEPTH, msl, air)
-    subprocess.run([*MAC_LINK, air, '-o', lib], check=True)
+MAC_RECORD = 'spirv-only'
+METAL_DEPTH = []
+METAL_FP = ''
+MAC_RUN = MAC_LINK = []
 
 def record_index(path):   # → (an open descriptor, {a record's key: its bytes' (start, end)}): shader_split.py writes each record's key at +0x08, its bytes from its marker to the next one
     # Scanned through a read-only mapping that is closed again, so no package stays in this process. Pokopia's ps_rdb.bin (4.25 GB) read and cut into its 105,118
@@ -83,9 +63,11 @@ def record_index(path):   # → (an open descriptor, {a record's key: its bytes'
         offs = [x.start() for x in re.finditer(b'BTCDBTCD', m)] + [n]
         return fd, {m[o + 8:o + 16].hex(): (o, e) for o, e in zip(offs, offs[1:])}
 
-def clone(src, dst):   # APFS copy-on-write, else a plain copy; the clonefile call, not a cp: a fork of this large process costs about 6 ms
+def clone(src, dst):   # a plain copy; the Asahi fork has no Apple APFS clone step
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    dmsh_mtlcache.clone(src, dst)
+    tmp = f'{dst}.tmp-{os.getpid()}-{threading.get_ident()}'
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
 
 def atomic_json(path, value):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -103,7 +85,7 @@ def tool_fingerprint():
     sc = subprocess.run([SPIRV_CROSS, '--version'], capture_output=True, text=True, timeout=30)
     return ('lock\0' + open(dmsh_chain.LOCK).read() + '\0options\0' + dmsh_chain.options() +
             '\0xlate\0' + dmsh_chain.xlate_source_sha() + '\0spirv-cross\0' + sc.stdout + sc.stderr +
-            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else '') + '\0metal\0' + METAL_FP)
+            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0metal\0' + METAL_FP)
 
 # The profile keys that change how a shader is built (nvn_*, shader_*), as dmsh_chain.inputs takes them: part of every shader's cache key
 PROFILE_ROWS = dmsh_chain.profile_rows(GAME)
@@ -127,7 +109,7 @@ CAS_USED = '_b_cas.txt'   # in the Mac library directory b-<V>/: the cache_path 
 # A finished shader's outputs are staged in the cache, under a name of this output folder's, and leave the disk (commit); the image is written from them at the end (publish_library).
 # A stopped build leaves them there, and the next build of this folder clears them first: its shaders come back from the cache entries publish_cache wrote
 STAGE = 'stage/' + hashlib.sha256(os.path.realpath(out).encode()).hexdigest()[:16]
-def label_dir(label) -> str: return out if label == 'mac' else IOSOUT or ''   # '' when this build makes no iPhone libraries
+def label_dir(label) -> str: return out if label == 'mac' else ''   # Asahi has one output directory
 
 def output(label, name):
     """An output file's bytes: on disk while its shader is in flight, else staged; for a partial build, a shader it does not build is read from the image it builds on. None when there is none"""
@@ -152,7 +134,7 @@ def commit(key='', names=None):
     and all of them stay on disk, where publish_library finds them too"""
     staged = []
     with STORE.batch():
-        for label in ('mac', 'ios'):
+        for label in ('mac',):
             d = label_dir(label)
             if not d: continue
             for n in (names if names is not None else [n for n in os.listdir(d) if n.startswith(key + '_')]):
@@ -186,14 +168,13 @@ def publish_library(label):
 
 def cache_outputs(key, digest, cached=False):
     root = cache_path(digest); files = {}
-    for label, directory in (('mac', out), ('ios', IOSOUT)):
-        if not directory: continue
-        # fin(), paired vertex padding and the profile tables also need these on an iOS-only cache hit.
-        required = [key + '_b.json'] + ([key + '_b.metal'] if label == 'mac' else [])
-        if label in TARGETS: required.append(key + '_b.metallib')
+    for label, directory in (('mac', out),):
+        # fin(), paired vertex padding and the profile tables need the MSL too;
+        # a SPIR-V-only build has no metallib.
+        required = [key + '_b.json', key + '_b.spv', key + '_b.metal']
+        if not SPIRV_ONLY: required.append(key + '_b.metallib')
         have = STORE.names(f'{root}/{label}/') if cached else set()
-        names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal')
-                            if (label == 'mac' or ext != '.metal') and (ext != '.metallib' or label in TARGETS)]
+        names = required + [key + s + ext for s in ('_bg0', '_bg1', '_bg2', '_bg3', '_bg4', '_bgv', '_bl0', '_bl1', '_bl3') for ext in ('.metallib', '.json', '.metal', '.spv')]
         found = [n for n in names if (f'{root}/{label}/{n}' in have if cached else os.path.exists(os.path.join(directory, n)))]
         if not all(n in found for n in required): return None
         files[label] = found
@@ -204,7 +185,7 @@ def restore_cache(key, digest):
     if not found: return False
     root, files = found
     for label, names in files.items():
-        directory = out if label == 'mac' else IOSOUT
+        directory = out
         for name in names:
             src = f'{root}/{label}/{name}'; dst = os.path.join(directory, name)
             if name.endswith('.json'):
@@ -235,7 +216,7 @@ def publish_cache(key, digest, rule_fp, code_fp):
     with STORE.batch():   # a stop leaves the whole entry or none of it
         for label, names in files.items():
             for name in names:
-                src = os.path.join(out if label == 'mac' else IOSOUT, name)
+                src = os.path.join(out, name)
                 if name.endswith('.json'):
                     value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None); value.pop('alpha', None); value.pop('logic', None)   # the side libraries are made again from the restored MSL (ps_libraries, vin_finish, pull_finish)
                     STORE.put(f'{root}/{label}/{name}', json.dumps(value, ensure_ascii=False, indent=1).encode())
@@ -243,8 +224,7 @@ def publish_cache(key, digest, rule_fp, code_fp):
         STORE.put(cache_meta_path(key), json.dumps({'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp}).encode())
 
 def write_refl(key, refl):
-    for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):
-        atomic_json(os.path.join(d, key + '_b.json'), MTL.with_compiler(target, refl))
+    atomic_json(os.path.join(out, key + '_b.json'), MTL.with_compiler('mac', refl))
 
 VIN_STATS = collections.Counter()
 PULL_STATS = collections.Counter()
@@ -255,8 +235,8 @@ def pull_finish(key, full, refl):
     """The pulling library <key>_bp of a vertex shader with stage inputs (dmsh_pull.py: no [[stage_in]], the inputs read through the per-draw layout block), compiled through the
     MSL-keyed Metal cache with the chain's flags; reflection 'pull' names its entry points, the layout block's buffer index and the inputs. Shaders without stage inputs get none
     (their pipelines have no vertex descriptor anyway), nor does a shader the variant does not fit (stale libraries removed). Changes refl; the caller writes it"""
-    if refl['stage'] != 'vs': return refl
-    libs = [os.path.join(out, key + '_bp.metallib')] + ([os.path.join(IOSOUT, key + '_bp.metallib')] if IOSOUT else [])
+    if refl['stage'] != 'vs' or SPIRV_ONLY: return refl
+    libs = [os.path.join(out, key + '_bp.metallib')]
     refl.pop('pull', None)
     def drop():
         for p in libs:
@@ -269,8 +249,7 @@ def pull_finish(key, full, refl):
         drop(); return refl
     msl = os.path.join(w, key + '_bp.metal'); open(msl, 'w').write(v)
     try:
-        if 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
-        if IOSOUT and IOS_PULL: MTL.compile('ios', msl, libs[1])
+        MTL.compile('mac', msl, libs[0])
     except subprocess.CalledProcessError as e:
         PULL_STATS['failed'] += 1; print(f'[RED] {key}: the pulling library does not compile ({str(e)[:120]}): its pipelines are always built for the draw\'s vertex layout', flush=True)
         drop(); return refl
@@ -284,8 +263,8 @@ def pull_finish(key, full, refl):
 def vin_finish(key, full, refl):
     """The shadow-input library <key>_bv of a vertex shader with integer inputs (dmsh_vin.py), compiled through the MSL-keyed Metal cache; reflection 'vin' names its entry points and
     the shadow attribute indices. Other shaders get none (stale libraries removed). Changes refl; the caller writes it"""
-    if refl['stage'] != 'vs': return refl
-    libs = [os.path.join(out, key + '_bv.metallib')] + ([os.path.join(IOSOUT, key + '_bv.metallib')] if IOSOUT else [])
+    if refl['stage'] != 'vs' or SPIRV_ONLY: return refl
+    libs = [os.path.join(out, key + '_bv.metallib')]
     refl.pop('vin', None)
     def drop():
         for p in libs:
@@ -298,8 +277,7 @@ def vin_finish(key, full, refl):
     VIN_STATS['generated'] += 1
     msl = os.path.join(w, key + '_bv.metal'); open(msl, 'w').write(v)
     try:
-        if 'mac' in TARGETS: MTL.compile('mac', msl, libs[0])
-        if IOSOUT: MTL.compile('ios', msl, libs[1])
+        MTL.compile('mac', msl, libs[0])
     except subprocess.CalledProcessError as e:
         VIN_STATS['failed'] += 1; print(f'[RED] {key}: the shadow-input library does not compile ({str(e)[:120]}): its integer inputs keep the CPU conversion', flush=True)
         drop(); return refl
@@ -317,7 +295,8 @@ def ps_libraries(key, msl, full, bindings):
     What does not build is left out, and only that: a unit whose readable-tile version does not build is compiled again without it, one that does not build at all gives <key>_b from the
     plain source, each with a red line. A library a shader does not get is removed (a stale one of an earlier build), and the host draws without it. → what the reflection says of them.
     Raises CalledProcessError when the plain source does not compile"""
-    targets = [(t, d) for t, d in (('mac', out), ('ios', IOSOUT)) if d and t in TARGETS]
+    if SPIRV_ONLY: return {}   # the Vulkan replay injects alpha tests and uses Vulkan logic ops
+    targets = [('mac', out)]
     def drop(*suffixes):
         for _, d in targets:
             for s in suffixes:
@@ -516,7 +495,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # dmsh_side.py is in it: dmsh_entry's fs_uint and fs_dual write main0's shared body (shared_body).
 # dmsh_fetch.py is not, but for screen_varyings (raster_facts), nor are the other side libraries' modules: they are made again from the restored MSL on every build (ps_libraries;
 # test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, abi))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -685,6 +664,8 @@ def geometry_finish(key, w, j, c1):
         layout = dmsh_geometry.output_layout(code, t)
         k = job['key']; spv = os.path.join(w, k + '.spv')
         dmsh_geometry.flatten_sets(spv)
+        try: shutil.copyfile(spv, os.path.join(out, key + '_bg' + str(t) + '.spv'))   # the Vulkan geometry variant (Asahi replay); the JSON name is key + '_bg' + t
+        except OSError as e: return 'SPIR-V export failed', str(e)[:160], None
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
         try: selected = dmsh_rewrite.uniform_tests(dmsh_fetch.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))))   # precise, a tested bit 0's mask (bit0_mask), bounded uniform reads as selects (dmsh_fetch.select_guards), tested words as volatile loads (uniform_tests), as finish makes them
@@ -700,11 +681,8 @@ def geometry_finish(key, w, j, c1):
                 'bindings': dmsh_reflect.reflect(key, 'gs', src, res), 'vertex_inputs': [], 'raster': {}}
         def save(suffix, text, meta):
             path = os.path.join(out, key + suffix + '.metal'); open(path, 'w').write(text)
-            if 'mac' in TARGETS: MTL.compile('mac', path, os.path.join(out, key + suffix + '.metallib'))
+            MTL.compile('mac', path, os.path.join(out, key + suffix + '.metallib'))
             atomic_json(os.path.join(out, key + suffix + '.json'), MTL.with_compiler('mac', meta))
-            if IOSOUT:
-                MTL.compile('ios', path, os.path.join(IOSOUT, key + suffix + '.metallib'))
-                atomic_json(os.path.join(IOSOUT, key + suffix + '.json'), MTL.with_compiler('ios', meta))
         save('_bg' + str(t), src, refl)
         # Passthrough input without adjacency: a lean kernel the host can pair with the game's own vertex shader (dmsh_geometry.lean)
         if dmsh_geometry.passthrough(code) and t in (0, 1, 3):
@@ -760,6 +738,11 @@ def finish(key, w, j, c1):
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
             if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
             src = open(msl).read()
+    # Keep the Vulkan module beside the Metal library: the Asahi replay loads
+    # it directly, no Metal step involved. This is the final SPIR-V (after the
+    # single-lane and integer-input rewrites) SPIRV-Cross consumed above.
+    try: shutil.copyfile(os.path.join(w, key + '.spv'), os.path.join(out, key + '_b.spv'))
+    except OSError as e: return 'SPIR-V export failed', str(e)[:160], None
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     if j['stage'] == 'ps':
@@ -837,10 +820,9 @@ def finish(key, w, j, c1):
     try: binds = dmsh_reflect.reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
     side, lost = {}, []
-    def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
+    def compile_targets():   # the Asahi fork keeps the MSL as the reflection source; nothing is compiled
         if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read(), binds)); return
-        if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
-        if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
+        MTL.compile('mac', msl, lib)
     try: compile_targets()
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
@@ -885,7 +867,7 @@ BATCH = 4 * NJ   # shaders translated and finished together: the next batch is t
 OUT_KEY = re.compile(r'([0-9a-f]{16})_b')
 STAMP_BEFORE = shader_lib.read_stamp(out).get('inputs')
 OLD_IMAGE = {}
-for _label, _d in (('mac', out), ('ios', IOSOUT)):
+for _label, _d in (('mac', out),):
     if not _d: continue
     if not want:
         shutil.rmtree(_d, ignore_errors=True); shader_lib.remove_image(_d)
@@ -915,13 +897,16 @@ _work = os.environ.get('WORK') or tempfile.gettempdir()
 sweep_work(_work)
 w = tempfile.mkdtemp(prefix='dmsh_', dir=_work)
 with open(os.path.join(w, 'pid'), 'w') as _f: _f.write(str(os.getpid()))
-MTL = dmsh_mtlcache.Cache(STORE, {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
-# first take the libraries earlier chain versions left on disk: the b-*/ and b-*.img beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
-for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
-    _mac, _, _ios = _spec.partition('=')
-    for _b in sorted(os.listdir(_mac)) if os.path.isdir(_mac) else []:
-        if _b.startswith('b-') and os.path.realpath(shader_lib.folder_of(os.path.join(_mac, _b))) != os.path.realpath(out):
-            for _ln in MTL.fill(os.path.join(_mac, _b), os.path.join(_ios, _b) if _ios else None, targets=TARGETS): print(_ln, flush=True)
+class _NoMetal:
+    """Placeholder for the removed Metal compile cache: the MSL is still produced
+    and read for reflection, but nothing compiles it."""
+    def __init__(self, store): self.store = store; self.stats = collections.Counter()
+    def with_compiler(self, target, refl): return refl
+    def compile(self, *a, **k): pass
+    def compile_split(self, *a, **k): pass
+    def fill(self, *a, **k): return []
+    def summary(self): return ''
+MTL = _NoMetal(STORE)
 
 # Progress for the NSP script (DMSH_PROGRESS: a small JSON file it reads, build_ipa_from_nsp.py ShaderWatch), written at most every half second
 PROGRESS = os.environ.get('DMSH_PROGRESS')
@@ -1018,7 +1003,7 @@ def finished(*_):   # one more shader finished, for the progress
 # process, made before any thread starts, so it has every table and fingerprint read above; spawn would run this script again, its start removing the outputs. A worker does not open
 # the cache: this process makes its calls on the one connection (shader_cache.Served: Apple's SQLite crashes when a fork opens a database, GitHub issue #2354), so its outputs and
 # cache entries go into the file as a thread's did; what fin returns and what it counted come back here,
-# in the batch's order, so the results, the summary and every file written are those of the threads (DMSH_PROCS=0). The precompiled Metal headers (dmsh_pch.py) are made here before the
+# in the batch's order, so the results, the summary and every file written are those of the threads (DMSH_PROCS=0).
 # fork: a worker would make its own (three compiles for each target in each worker) in a folder that nothing removes, as a worker process ends without atexit. A worker that dies
 # (killed, out of memory) stops the build with one line
 COUNTERS = (PRE_STATS, VIN_STATS, PULL_STATS, SIDE_STATS, BF_STATS, MTL.stats)
@@ -1051,8 +1036,6 @@ def results(fs):   # → what fin returned for them, in their order (a worker's 
 SERVED = shader_cache.Served(STORE, PROCS) if PROCS and keys else None
 px = cf.ProcessPoolExecutor(PROCS, mp_context=multiprocessing.get_context('fork'), initializer=worker_start) if PROCS and keys else None
 if px:
-    if 'mac' in TARGETS: dmsh_pch.header(MAC_RUN + METAL_DEPTH)
-    if IOSOUT: dmsh_pch.header(ios_metal.METAL + ios_metal.DEPTH)
     px.submit(int).result()   # forks every worker now, while this process has no other thread
     assert SERVED is not None; SERVED.start()
 # Two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last, in batches of their own, once every shader before them is finished. The next batch is
@@ -1082,17 +1065,17 @@ if px: px.shutdown()
 # compute path otherwise (nvn_geometry.inc geo_mesh_draw), which records the pair for the next build
 MESH_STATS = collections.Counter()
 def mesh_finish(pair):
+    if SPIRV_ONLY: return   # the Asahi replay has a real geometry stage; mesh lowering is Metal-only
     vk, gk = pair
     vs, gs, gj = (output('mac', n) for n in (vk + '_b.metal', gk + '_bl3.metal', gk + '_bl3.json'))   # staged by now
     name = f'{vk}_{gk}_m3.metallib'
-    libs = [os.path.join(out, name)] + ([os.path.join(IOSOUT, name)] if IOSOUT else [])
+    libs = [os.path.join(out, name)]
     if vs is None or gs is None or gj is None: MESH_STATS['missing a library'] += 1; return
     try: msl = dmsh_mesh.compose(vs.decode(), gs.decode(), json.loads(gj)['geometry']['capture_reads'])
     except ValueError as e: MESH_STATS['not composed'] += 1; print(f'[RED] mesh {vk} {gk}: {e}', flush=True); return
     path = os.path.join(w, f'{vk}_{gk}_m3.metal'); open(path, 'w').write(msl)
     try:
-        if 'mac' in TARGETS: MTL.compile('mac', path, libs[0])
-        if IOSOUT: MTL.compile('ios', path, libs[1])
+        MTL.compile('mac', path, libs[0])
         MESH_STATS['built'] += 1
     except subprocess.CalledProcessError as e: MESH_STATS['failed to compile'] += 1; print(f'[RED] mesh {vk} {gk}: does not compile ({str(e)[:120]})', flush=True)
     finally:
@@ -1141,11 +1124,10 @@ if not want:   # a full build: the stamp, then the c1 guard and uniform read ext
     # every full build writes them, and the iOS folder goes whole into the IPA. Before the stamp, so a stamped folder always has its list
     with open(os.path.join(out, CAS_USED + '.tmp'), 'w') as _f: _f.write(''.join(d + '\n' for d in sorted(set(digests.values()))))
     os.replace(os.path.join(out, CAS_USED + '.tmp'), os.path.join(out, CAS_USED))
-    for _d in [out] + ([IOSOUT] if IOSOUT else []): dmsh_chain.write_stamp(_d, GAME.id, INPUTS)
+    dmsh_chain.write_stamp(out, GAME.id, INPUTS)
     print(f'library stamp: game {GAME.id}, inputs {INPUTS}', flush=True)
 # The libraries' images, from what this build staged (and for a partial build the images it builds on): the folders go, and what reads a library from here on reads the image
-for _label in ('mac', 'ios'):
-    if label_dir(_label): publish_library(_label)
+publish_library('mac')
 if PROGRESS:
     try: os.unlink(PROGRESS)
     except FileNotFoundError: pass
