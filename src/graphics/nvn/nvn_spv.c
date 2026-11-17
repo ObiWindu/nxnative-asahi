@@ -196,7 +196,7 @@ static int spv_reflect(const spv_mod *m, nvn_desc_bind *out, int max) {
         if (!wc || i + wc > m->n) break;
         if (op == SPV_OP_VARIABLE && wc >= 4) {
             uint32_t type_id = m->words[i + 1], id = m->words[i + 2], sc = m->words[i + 3];
-            if (!spv_id_valid(m, type_id) || !spv_id_valid(m, id)) return n;
+            if (!spv_id_valid(m, type_id) || !spv_id_valid(m, id)) return -1;
             int32_t binding = m->binding[id], set = m->set[id];
             if (binding >= 0 && (sc == SPV_STORAGE_UNIFORM_CONSTANT || sc == SPV_STORAGE_UNIFORM || sc == SPV_STORAGE_STORAGE_BUFFER)) {
                 // type_id is a pointer: its pointee is the variable's type
@@ -211,9 +211,11 @@ static int spv_reflect(const spv_mod *m, nvn_desc_bind *out, int max) {
                 }
                 uint32_t count = 1;
                 VkDescriptorType dt = spv_descriptor(m, pointee, &count, sc);
-                if (dt != VK_DESCRIPTOR_TYPE_MAX_ENUM && n < max) {
-                    out[n++] = (nvn_desc_bind){(uint32_t)binding, set >= 0 ? (uint32_t)set : 0, dt, count, -1};
-                }
+                if (dt == VK_DESCRIPTOR_TYPE_MAX_ENUM || n >= max) return -1;
+                uint32_t desc_set = set >= 0 ? (uint32_t)set : 0;
+                for (int j = 0; j < n; j++)
+                    if (out[j].binding == (uint32_t)binding && out[j].set == desc_set) return -1;
+                out[n++] = (nvn_desc_bind){(uint32_t)binding, desc_set, dt, count, -1};
             }
         }
         i += wc;
@@ -323,10 +325,20 @@ static int shader_load_impl(const char *dir, const char *key, int geo, nvn_shade
     spv_mod m;
     if (spv_parse(out->spv, out->spv_words, &m) != 0) {
         snprintf(out->load_error, sizeof out->load_error, "%s_b.spv is not SPIR-V", key);
-        nvn_shader_free(out);
+        free(out->spv);
+        out->spv = NULL;
+        out->spv_words = 0;
         return -1;
     }
     out->ndesc = spv_reflect(&m, out->desc, (int)(sizeof out->desc / sizeof *out->desc));
+    if (out->ndesc < 0) {
+        snprintf(out->load_error, sizeof out->load_error, "%s%s.spv has unsupported or excessive descriptor bindings", key, suffix);
+        spv_free(&m);
+        free(out->spv);
+        out->spv = NULL;
+        out->spv_words = 0;
+        return -1;
+    }
     out->push_size = spv_push_size(&m);
     spv_entry_name(&m, out->entry, sizeof out->entry);
     spv_free(&m);

@@ -1,11 +1,28 @@
 // GLSLC at run time. Fire Emblem: Three Houses (KTGL, SDK 6.5.0) compiles 9 built-in GLSL shaders at boot with the game's own runtime compiler (subsdk0, glslcCompile called through a function
 // table from main+0x9c89f8; the sources are plain strings in main, e.g. "in vec3 ktglPosition0; …"). Their outputs are in no game file, and shaders are translated offline only, so the
-// outputs are captured once on the Mac: DM_GLSLC_CAPTURE=<dir> writes every successful compile's GLSLC output (magic 0x19866891, the whole output's length at +0x44) to
+// outputs are captured by either host: DM_GLSLC_CAPTURE=<dir> writes every successful compile's GLSLC output (magic 0x19866891, the whole output's length at +0x44) to
 // <dir>/<FNV-1a of the output>.glslc. shader_split.py reads that folder like any other source of GLSLC outputs (the NSP script makes it for a game whose main holds GLSL sources and imports glslcCompile).
 // The compile object's first word points at its last results {GLSLCcompilationStatus *, GLSLCoutput *}; the status has "success" at +0xc and "allocation error" at +0xd, which is what the
 // game itself reads after the call (main+0x9c8a04)
 #include "hle.h"
 #include <sys/stat.h>
+#include <unistd.h>
+
+static int capture_matches(const char *path, const uint8_t *data, uint32_t size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    uint8_t buf[4096];
+    uint32_t off = 0;
+    int same = 1;
+    while (off < size) {
+        size_t n = size - off < sizeof buf ? size - off : sizeof buf;
+        if (fread(buf, 1, n, f) != n || memcmp(buf, data + off, n)) { same = 0; break; }
+        off += (uint32_t)n;
+    }
+    if (same && fgetc(f) != EOF) same = 0;
+    fclose(f);
+    return same;
+}
 
 static void capture(const void *obj) {
     static const char *dir; static int init;
@@ -17,9 +34,21 @@ static void capture(const void *obj) {
     if (*(const uint32_t *)out != 0x19866891 || n < 0x48 || n > (64u << 20)) { LOG("[RED] glslc: unknown output header (magic %#x length %#x), not saved", *(const uint32_t *)out, n); return; }
     uint64_t h = 0xcbf29ce484222325ull; for (uint32_t i = 0; i < n; i++) h = (h ^ out[i]) * 0x100000001b3ull;
     char path[1024]; snprintf(path, sizeof path, "%s/%016llx.glslc", dir, (unsigned long long)h);
-    struct stat st; if (!stat(path, &st)) return;
-    FILE *f = fopen(path, "wb"); if (!f) { LOG("[RED] glslc: cannot write %s", path); return; }
-    fwrite(out, 1, n, f); fclose(f);
+    if (capture_matches(path, out, n)) return;
+    char tmp[1100];
+    int len = snprintf(tmp, sizeof tmp, "%s.tmp.XXXXXX", path);
+    if (len < 0 || (size_t)len >= sizeof tmp) { LOG("[RED] glslc: capture path is too long: %s", path); return; }
+    int fd = mkstemp(tmp);
+    if (fd < 0) { LOG("[RED] glslc: cannot create a temporary capture beside %s", path); return; }
+    FILE *f = fdopen(fd, "wb");
+    if (!f) { close(fd); unlink(tmp); LOG("[RED] glslc: cannot open temporary capture for %s", path); return; }
+    int ok = fwrite(out, 1, n, f) == n && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || rename(tmp, path) != 0) {
+        unlink(tmp);
+        LOG("[RED] glslc: cannot atomically save %s", path);
+        return;
+    }
     LOG("glslc: saved a run-time compile output %s (%u bytes)", path, n);
 }
 

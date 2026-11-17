@@ -118,12 +118,13 @@ def nso_image(path):
     return bytes(m.image), m.segments[1][0], len(m.image)
 
 class OodleHost:
-    """The game's own OodleLZ_Decompress in the Mac host's tool mode (DM_OODLE_SERVE, dm/host/hle_oodle.c: served before the SDK starts, so no boot), called as decode(compressed, raw length).
-    host = the Mac host built for the game, modules = its rewritten modules, env = the host's environment (default: this process's)"""
-    def __init__(self, host, modules, env=None):
+    """The game's OodleLZ_Decompress in host tool mode (DM_OODLE_SERVE, dm/host/hle_oodle.c), called as decode(compressed, raw length).
+    host may be a command sequence, or the legacy host executable with modules as its second argument."""
+    def __init__(self, host, modules=None, env=None):
         import subprocess, tempfile
         self.err = tempfile.TemporaryFile()
-        self.p = subprocess.Popen([str(host), str(modules)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err, env=dict(env or os.environ, DM_OODLE_SERVE='1'))
+        cmd = [str(x) for x in host] if isinstance(host, (list, tuple)) else [str(host), str(modules)]
+        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err, env=dict(env or os.environ, DM_OODLE_SERVE='1'))
         self.n = 0
     def __call__(self, comp, n):
         try:

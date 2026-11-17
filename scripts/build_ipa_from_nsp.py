@@ -1811,19 +1811,29 @@ def check_glslc_coverage(observed, g):
 UE_DECODE_SECS = 300   # the longest Oodle decode run: Octopath Traveler 0's 10,596 shaders take about 10 s, the boot up to nnMain included
 
 
-def ue_stamp(d):   # what an extraction's decoded shader archives were made from: its paks and IoStore TOCs (paths and sizes)
-    return ''.join(f'{p.relative_to(rfs.source(d))}\t{p.stat().st_size}\n' for p in sorted([*(rfs.source(d)).rglob('*.pak'), *(rfs.source(d)).rglob('*.utoc')]))
+def ue_stamp(d):   # content identity of every source container that can hold UE shader archives or IoStore shader chunks
+    import hashlib
+    root = rfs.source(d)
+    sources = sorted(p for ext in ('*.pak', '*.utoc', '*.ucas') for p in root.rglob(ext))
+    rows = []
+    for p in sources:
+        h = hashlib.sha256()
+        with open(p, 'rb') as f:
+            for block in iter(lambda: f.read(1024 * 1024), b''): h.update(block)
+        rows.append(f'{p.relative_to(root)}\t{p.stat().st_size}\t{h.hexdigest()}\n')
+    return ''.join(rows)
 
 
-def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
+def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g, host_command=None):
     """A game with Unreal paks (Octopath Traveler 0): Unreal Engine keeps its shaders in the shader code archives of its paks, each shader Oodle-compressed, and only the game's own Oodle
-    decodes them. dm/gfx/tools/uepak.py takes the archives out of the paks (the pak index is AES-encrypted with a key from main) and writes one Oodle job; the game's code decodes it in the Mac host
+    decodes them. dm/gfx/tools/uepak.py takes the archives out of the paks (the pak index is AES-encrypted with a key from main) and writes one Oodle job; the game's code decodes it in the native host
     (DM_OODLE_JOB, dm/host/hle_oodle.c: right before nnMain, then the host exits), and the decoded archives go to <version dir>/ue_shaders, where shader_split.py reads them.
     The job runs the packed version's code (Oodle's format does not change between builds). Unreal Engine 4.26 and later compress shaders with LZ4 by default (DRAGON QUEST VII Reimagined),
     which uepak.py decodes itself, so such a game needs no host run here. Unreal Engine 5.6 (FINAL FANTASY RESONANCE) keeps its shader libraries in the IoStore container instead, two layers
-    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. A folder whose stamp matches its paks is reused"""
+    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in host tool mode (uepak.OodleHost), with no SDK startup. A folder whose stamp matches its paks is reused"""
     sys.path.insert(0, str(repo / 'dm/gfx/tools')); import uepak
-    todo = {v: d for v, d in dirs.items() if not ((d / 'ue_shaders/stamp').exists() and (d / 'ue_shaders/stamp').read_text() == ue_stamp(d))}
+    stamps = {v: ue_stamp(d) for v, d in dirs.items()}
+    todo = {v: d for v, d in dirs.items() if not ((d / 'ue_shaders/stamp').exists() and (d / 'ue_shaders/stamp').read_text() == stamps[v])}
     PROG.stage('UE shader decode')
     if not todo:
         say(f'reusing the decoded shader archives: {", ".join(str(d / "ue_shaders") for d in dirs.values())}')
@@ -1835,10 +1845,12 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
         dec = None
         if uepak.io_shader_tocs(str(rfs.source(d))):
-            if not host:
+            if host_command:
+                dec = uepak.OodleHost(host_command, env=dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp')))
+            elif not host:
                 PROG.set(step='building the Mac host')
                 host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-            dec = uepak.OodleHost(host, patched, env)
+            if not dec: dec = uepak.OodleHost(host, patched, env)
         PROG.set(step=f'{v}: shader archives out of the paks' + (' and IoStore containers' if dec else ''))
         try: listing, n = uepak.job(str(rfs.source(d)), str(d / 'ExeFS/main'), str(jd), decode=dec)
         except ValueError as e: raise BuildError(str(e)) from e   # a damaged pak, archive or main (uepak's errors name it)
@@ -1846,20 +1858,26 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
             if dec: dec.close()
         if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')
         say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
-            + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
+            + (f'; decoding {n:,} with the game\'s Oodle in the Linux host' if n and host_command else f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
         if n:   # Oodle-compressed shaders (Octopath Traveler 0); LZ4 ones (Unreal Engine 4.26 and later by default) are decoded by uepak.py already
-            if not host:
+            if not host_command and not host:
                 PROG.set(step='building the Mac host')
                 host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-            PROG.set(step=f'{v}: decoding {n:,} shaders in the Mac host')
-            henv = dict(env, DM_ROMFS=str(rfs.source(dirs[pkg_ver])), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_OODLE_JOB=str(jd / 'oodle.job'))
-            rc = boot_mac(host, patched, henv, rd, log, UE_DECODE_SECS)
+            PROG.set(step=f'{v}: decoding {n:,} shaders in the ' + ('Linux' if host_command else 'Mac') + ' host')
+            henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_OODLE_JOB=str(jd / 'oodle.job'))
+            if host_command:
+                try:
+                    with open(log, 'w') as f: rc = subprocess.run(host_command, env=henv, stdout=f, stderr=subprocess.STDOUT, timeout=UE_DECODE_SECS).returncode
+                except subprocess.TimeoutExpired: rc = -1
+            else:
+                henv['DM_MSL_DIR'] = str(rd / 'msl')
+                rc = boot_mac(host, patched, henv, rd, log, UE_DECODE_SECS)
             if rc != 0 or not (jd / 'oodle.job.out').exists():
                 PROG.end(ok=False)
                 PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=20)).rstrip('\n'))
                 raise BuildError(f'the Oodle decode run stopped with exit {rc} (host output: {log})')
         out = d / 'ue_shaders.partial'; rmtree(out)
-        uepak.finish(str(jd), str(out)); (out / 'stamp').write_text(ue_stamp(d))
+        uepak.finish(str(jd), str(out)); (out / 'stamp').write_text(stamps[v])
         swap_in(out, d / 'ue_shaders'); rmtree(jd); rmtree(rd); total += n + sum(x['shaders'] for x in listing if x['compression'] == 'IoStore, decoded')
     PROG.end(f'{total:,} shaders in {hms(time.time() - t0)}')
 
@@ -2278,7 +2296,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     """The shader split into pkg, checked against the profile's tables. The package is reused when the extractor and the modules it imports, the profile settings and tables it reads or is checked against,
     the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (a damaged copy, ALLOW_DAMAGED, is keyed by its RomFS files' times and its damage list, so only the same extraction reuses it): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
-    oodle: for decoder-backed packs, builds or reuses the Mac host and returns DM_OODLE_HOST / DM_OODLE_MODULES. Verified host provenance ignores only its chain label;
+    oodle: for decoder-backed packs, supplies the game host command plus its executable and rewritten modules for cache identity. Verified host provenance ignores only its chain label;
     unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache."""
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
     PROG.stage('shader split', step='checking the inputs')   # then the count of files and archive ranges scanned (shader_split.py's progress lines); the package and tables come at the end
@@ -2293,7 +2311,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     if env.get('DM_NRO_DIR'): inputs += [('files', sorted(Path(env['DM_NRO_DIR']).glob('*.nro')))]   # NROs captured from a boot (capture_nro)
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
-        PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
+        PROG.set(step='preparing the game\'s Oodle decoder'); env = dict(env, **oodle())
         host = Path(env['DM_OODLE_HOST'])
         inputs += [('decoder', decoder_host_key(host) or fingerprint(('files', [host]))), ('modules', package_key(Path(env['DM_OODLE_MODULES'])))]
     # A damaged copy (ALLOW_DAMAGED) is reused too, but only as the same extraction: a repaired copy keeps every path and size, all 'tree' sees, so its RomFS is keyed by 'stat' (the

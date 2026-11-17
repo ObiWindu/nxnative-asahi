@@ -83,6 +83,31 @@ files, rewritten modules, shader cache and prepared game folder stay in
 `<source>/<id>_build/`; delete that folder to start over. A NUP or dump needs
 no keys.
 
+Some NVN games compile GLSL at run time and have no packaged copy of their
+GLSLC outputs. Capture them on Linux in two passes: first prepare the runtime
+without building shaders, launch the generated `run.sh` long enough to reach
+the code that compiles them, then import the capture directory to build the
+shader cache. The first run script sets `DM_GLSLC_CAPTURE` automatically; the
+capture files stay under the game's `_build` folder.
+
+```sh
+python3 scripts/build_asahi_from_nsp.py <same source> --skip-shaders
+<source>/<title-id>_build/run.sh
+python3 scripts/build_asahi_from_nsp.py <same source> --glslc-capture-dir \
+  <source>/<title-id>_build/glslc_capture/<package-version>
+```
+
+The importer checks each output's GLSLC header and exact byte length. If the
+profile names required outputs in `shader_map.tsv`, every named output must be
+present and valid before the cache build proceeds. Capture files are
+content-addressed and written atomically, so an interrupted run can be
+repeated safely.
+
+Detected Unreal and other Oodle-backed shader packs are decoded during the
+Linux import with the game build's own decoder in the native host. No separate
+Mac decoder is used or bundled. Formats the game does not expose a usable
+decoder for still stop with a diagnostic.
+
 ## Run
 
 ```sh

@@ -72,6 +72,45 @@ int main(void) {
         mirror_match &= memcmp(out + (y * 8 + x) * 4, in + (y * 8 + (7 - x)) * 4, 4) == 0;
     CHECK(mirror_match, "texture copy mirror-X reverses each row");
 
+    NVNcommandBuffer cb_mirror_y;
+    NVNF(nvnCommandBufferInitialize)(&cb_mirror_y, &dev);
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_mirror_y, &pool, 0x1a000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_mirror_y);
+    NVNF(nvnCommandBufferCopyTextureToTexture)(&cb_mirror_y, &a, NULL, &r, &b, NULL, &r, NVN_COPY_FLAGS_MIRROR_Y_BIT);
+    NVNF(nvnCommandBufferCopyTextureToBuffer)(&cb_mirror_y, &b, NULL, &r, (NVNbufferAddress)(uintptr_t)out, 0);
+    NVNcommandHandle hmy = NVNF(nvnCommandBufferEndRecording)(&cb_mirror_y);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hmy);
+    NVNF(nvnQueueFinish)(&q);
+    int mirror_y_match = 1;
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+        mirror_y_match &= memcmp(out + (y * 8 + x) * 4, in + ((7 - y) * 8 + x) * 4, 4) == 0;
+    CHECK(mirror_y_match, "texture copy mirror-Y reverses row order");
+
+    // A texture clear over a subregion must preserve the pixels on either
+    // side. The prior copy left b as a known vertical mirror of a.
+    NVNcopyRegion clear_region = {2, 3, 0, 3, 2, 1};
+    const float clear_green[4] = {0, 1, 0, 1};
+    NVNcommandBuffer cb_clear;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_clear, &dev) == 1, "partial-clear command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_clear, &pool, 0x17000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_clear);
+    NVNF(nvnCommandBufferClearTexture)(&cb_clear, &b, NULL, &clear_region, clear_green, 0xf);
+    NVNcommandHandle hclear = NVNF(nvnCommandBufferEndRecording)(&cb_clear);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hclear);
+    NVNF(nvnQueueFinish)(&q);
+    uint8_t cleared[8 * 8 * 4];
+    NVNcopyRegion full8 = {0, 0, 0, 8, 8, 1};
+    mtl_read_texels(&b, 0, 0, &full8, cleared, 8 * 4, 8 * 8 * 4);
+    int clear_region_ok = 1;
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+        const uint8_t *actual = cleared + (y * 8 + x) * 4;
+        const uint8_t *before = in + ((7 - y) * 8 + x) * 4;
+        int inside = x >= 2 && x < 5 && y >= 3 && y < 5;
+        if (inside) clear_region_ok &= actual[0] < 5 && actual[1] > 250 && actual[2] < 5 && actual[3] > 250;
+        else clear_region_ok &= memcmp(actual, before, 4) == 0;
+    }
+    CHECK(clear_region_ok, "partial texture clear changes only its requested rectangle");
+
     // Exercise every selection field used by image copies: mip 1, array layer
     // 1, two-layer regions, row padding and per-image padding.
     NVNtexture aa, ab;
@@ -109,6 +148,24 @@ int main(void) {
     for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++)
         rows_match &= memcmp(layered_in + z * 32 + y * 12, layered_out + z * 32 + y * 12, 8) == 0;
     CHECK(rows_match, "two array layers copy with row and image strides");
+    NVNcommandBuffer cb_mirror_array_z;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_mirror_array_z, &dev) == 1, "array mirror-Z command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_mirror_array_z, &pool, 0x1b000, 0x10000);
+    NVNF(nvnCommandBufferSetCopyRowStride)(&cb_mirror_array_z, 12);
+    NVNF(nvnCommandBufferSetCopyImageStride)(&cb_mirror_array_z, 32);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_mirror_array_z);
+    NVNF(nvnCommandBufferCopyTextureToTexture)(&cb_mirror_array_z, &aa, NULL, &two_layers,
+        &ab, NULL, &two_layers, NVN_COPY_FLAGS_MIRROR_Z_BIT);
+    NVNF(nvnCommandBufferCopyTextureToBuffer)(&cb_mirror_array_z, &ab, NULL, &two_layers,
+        (NVNbufferAddress)(uintptr_t)layered_out, 0);
+    NVNcommandHandle hmaz = NVNF(nvnCommandBufferEndRecording)(&cb_mirror_array_z);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hmaz);
+    NVNF(nvnQueueFinish)(&q);
+    int mirror_array_z_match = 1;
+    for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++)
+        mirror_array_z_match &= memcmp(layered_out + z * 32 + y * 12,
+            layered_in + (1 - z) * 32 + y * 12, 8) == 0;
+    CHECK(mirror_array_z_match, "array texture copy mirror-Z reverses selected layers");
     uint8_t untouched[4] = {0xff, 0xff, 0xff, 0xff};
     NVNcopyRegion corner = {3, 3, 0, 1, 1, 1};
     mtl_read_texels(&aa, 0, 0, &corner, untouched, 4, 4);
@@ -158,6 +215,23 @@ int main(void) {
         scale_match &= memcmp(scaled_out + (y * 4 + x) * 4,
                               mip_in + ((y / 2) * 2 + x / 2) * 4, 4) == 0;
     CHECK(scale_match, "nearest texture blit scales a selected 2x2 mip region to 4x4");
+    uint8_t nearest_scaled[64];
+    memcpy(nearest_scaled, scaled_out, sizeof nearest_scaled);
+    NVNcommandBuffer cb_linear;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_linear, &dev) == 1, "linear-filter copy command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_linear, &pool, 0x1c000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_linear);
+    NVNF(nvnCommandBufferCopyTextureToTexture)(&cb_linear, &aa, &av, &src_small,
+        &ab, &bv0, &dst_large, NVN_COPY_FLAGS_LINEAR_FILTER_BIT);
+    NVNF(nvnCommandBufferCopyTextureToBuffer)(&cb_linear, &ab, &bv0, &dst_large,
+        (NVNbufferAddress)(uintptr_t)scaled_out, 0);
+    NVNcommandHandle hlinear = NVNF(nvnCommandBufferEndRecording)(&cb_linear);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hlinear);
+    NVNF(nvnQueueFinish)(&q);
+    const uint8_t *linear_center = scaled_out + (1 * 4 + 1) * 4;
+    int linear_ok = memcmp(linear_center, nearest_scaled + (1 * 4 + 1) * 4, 4) != 0;
+    for (int i = 0; i < 4; i++) linear_ok &= linear_center[i] >= 0xb0 && linear_center[i] <= 0xbf;
+    CHECK(linear_ok, "linear texture blit interpolates between source texels");
 
     NVNtexture packed_float, rgba_float;
     NVNtextureBuilder convert_builder;
@@ -216,6 +290,92 @@ int main(void) {
     for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++)
         volume_match &= memcmp(volume_in + z * 32 + y * 12, volume_out + z * 32 + y * 12, 8) == 0;
     CHECK(volume_match, "3D buffer copy preserves selected depth slices and strides");
+    NVNtexture volume_mirror;
+    NVNtextureBuilder mirror_builder;
+    NVNF(nvnTextureBuilderSetDefaults)(&mirror_builder); NVNF(nvnTextureBuilderSetDevice)(&mirror_builder, &dev);
+    NVNF(nvnTextureBuilderSetTarget)(&mirror_builder, NVN_TEXTURE_TARGET_3D);
+    NVNF(nvnTextureBuilderSetSize3D)(&mirror_builder, 4, 4, 4);
+    NVNF(nvnTextureBuilderSetFormat)(&mirror_builder, NVN_FORMAT_RGBA8);
+    NVNF(nvnTextureBuilderSetFlags)(&mirror_builder, NVN_TEXTURE_FLAGS_LINEAR);
+    NVNF(nvnTextureBuilderSetStorage)(&mirror_builder, &pool, 0x70000);
+    CHECK(NVNF(nvnTextureInitialize)(&volume_mirror, &mirror_builder) == 1, "3D mirror destination initializes");
+    uint8_t volume_mirror_out[64] = {0};
+    NVNcommandBuffer cb_volume_mirror;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_volume_mirror, &dev) == 1, "3D mirror-Z command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_volume_mirror, &pool, 0x1d000, 0x10000);
+    NVNF(nvnCommandBufferSetCopyRowStride)(&cb_volume_mirror, 12);
+    NVNF(nvnCommandBufferSetCopyImageStride)(&cb_volume_mirror, 32);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_volume_mirror);
+    NVNF(nvnCommandBufferCopyTextureToTexture)(&cb_volume_mirror, &volume, NULL, &volume_region,
+        &volume_mirror, NULL, &volume_region, NVN_COPY_FLAGS_MIRROR_Z_BIT);
+    NVNF(nvnCommandBufferCopyTextureToBuffer)(&cb_volume_mirror, &volume_mirror, NULL, &volume_region,
+        (NVNbufferAddress)(uintptr_t)volume_mirror_out, 0);
+    NVNcommandHandle hvm = NVNF(nvnCommandBufferEndRecording)(&cb_volume_mirror);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hvm);
+    NVNF(nvnQueueFinish)(&q);
+    int mirror_3d_z_match = 1;
+    for (int z = 0; z < 2; z++) for (int y = 0; y < 2; y++)
+        mirror_3d_z_match &= memcmp(volume_mirror_out + z * 32 + y * 12,
+            volume_in + (1 - z) * 32 + y * 12, 8) == 0;
+    CHECK(mirror_3d_z_match, "3D texture mirror-Z reverses selected depth slices");
+
+    NVNcopyRegion partial_volume_clear = {1, 1, 1, 1, 1, 1};
+    const float volume_green[4] = {0, 1, 0, 1};
+    NVNcommandBuffer cb_partial_volume_clear;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_partial_volume_clear, &dev) == 1,
+          "3D partial-clear command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_partial_volume_clear, &pool, 0x1e000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_partial_volume_clear);
+    NVNF(nvnCommandBufferClearTexture)(&cb_partial_volume_clear, &volume, NULL,
+        &partial_volume_clear, volume_green, 0xf);
+    NVNcommandHandle hpvc = NVNF(nvnCommandBufferEndRecording)(&cb_partial_volume_clear);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hpvc);
+    NVNF(nvnQueueFinish)(&q);
+    uint8_t cleared_volume_slice[4 * 4 * 4] = {0};
+    NVNcopyRegion volume_slice = {0, 0, 1, 4, 4, 1};
+    NVNcommandBuffer cb_read_volume_slice;
+    NVNF(nvnCommandBufferInitialize)(&cb_read_volume_slice, &dev);
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_read_volume_slice, &pool, 0x1f000, 0x10000);
+    NVNF(nvnCommandBufferSetCopyRowStride)(&cb_read_volume_slice, 16);
+    NVNF(nvnCommandBufferSetCopyImageStride)(&cb_read_volume_slice, 64);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_read_volume_slice);
+    NVNF(nvnCommandBufferCopyTextureToBuffer)(&cb_read_volume_slice, &volume, NULL, &volume_slice,
+        (NVNbufferAddress)(uintptr_t)cleared_volume_slice, 0);
+    NVNcommandHandle hrv = NVNF(nvnCommandBufferEndRecording)(&cb_read_volume_slice);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hrv);
+    NVNF(nvnQueueFinish)(&q);
+    const uint8_t *inside_volume = cleared_volume_slice + (1 * 4 + 1) * 4;
+    const uint8_t *outside_volume = cleared_volume_slice + (1 * 4) * 4;
+    int partial_volume_clear_ok = inside_volume[0] < 5 && inside_volume[1] > 250 &&
+        inside_volume[2] < 5 && inside_volume[3] > 250 &&
+        memcmp(outside_volume, volume_in + 12, 4) == 0;
+    CHECK(partial_volume_clear_ok,
+          "3D partial clear updates the requested voxel and preserves its neighboring voxel");
+
+    // A full clear through a texture view affects only the selected mip and
+    // array layer; it must not broaden to the backing image's other subresources.
+    const float view_clear[4] = {0, 0, 1, 1};
+    NVNcopyRegion view_clear_region = {0, 0, 0, 2, 2, 1};
+    NVNcommandBuffer cb_view_clear;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_view_clear, &dev) == 1, "view-clear command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_view_clear, &pool, 0x18000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_view_clear);
+    NVNF(nvnCommandBufferClearTexture)(&cb_view_clear, &aa, &av, &view_clear_region, view_clear, 0xf);
+    NVNcommandHandle hvclear = NVNF(nvnCommandBufferEndRecording)(&cb_view_clear);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hvclear);
+    NVNF(nvnQueueFinish)(&q);
+    uint8_t selected[16], unselected[16];
+    NVNcopyRegion selected_all = {0, 0, 0, 2, 2, 1};
+    mtl_read_texels(&aa, 1, 1, &selected_all, selected, 8, 16);
+    mtl_read_texels(&aa, 1, 0, &selected_all, unselected, 8, 16);
+    int selected_blue = 1, other_zero = 1;
+    for (int i = 0; i < 4; i++) {
+        selected_blue &= selected[i * 4] < 5 && selected[i * 4 + 1] < 5 &&
+                         selected[i * 4 + 2] > 250 && selected[i * 4 + 3] > 250;
+        other_zero &= unselected[i * 4] == 0 && unselected[i * 4 + 1] == 0 &&
+                      unselected[i * 4 + 2] == 0 && unselected[i * 4 + 3] == 0;
+    }
+    CHECK(selected_blue && other_zero, "texture-view clear touches only mip 1, array layer 1");
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN COPY TEST FAILED" : "NVN COPY TEST PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }

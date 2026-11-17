@@ -148,6 +148,15 @@ int main(void) {
     NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
     NVNF(nvnCommandBufferDrawElementsIndirect)(&cb, NVN_DRAW_PRIMITIVE_QUADS,
         NVN_INDEX_TYPE_UNSIGNED_SHORT, (NVNbufferAddress)(uintptr_t)idx, (NVNbufferAddress)(uintptr_t)ind);
+    // Primitive expansion must retain the NVN base-vertex offset and widen
+    // uint8 indices correctly. The source indices address vertices 0..3;
+    // adding baseVertex 3 selects the existing left-hand quad at 3..6.
+    NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
+    uint8_t *idx8 = storage + 0x9100;
+    idx8[0] = 0; idx8[1] = 1; idx8[2] = 2; idx8[3] = 3;
+    NVNF(nvnCommandBufferSetPrimitiveRestart)(&cb, 0, 0xff);
+    NVNF(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_QUADS,
+        NVN_INDEX_TYPE_UNSIGNED_BYTE, 4, (NVNbufferAddress)(uintptr_t)idx8, 3);
     NVNcommandHandle h = NVNF(nvnCommandBufferEndRecording)(&cb);
     NVNF(nvnQueueSubmitCommands)(&q, 1, &h);
     NVNF(nvnQueueFinish)(&q);
@@ -163,6 +172,13 @@ int main(void) {
     CHECK(indirect_quad[0] > 200 && indirect_quad[1] < 40 && indirect_quad[2] < 40,
           "indexed indirect draw applied firstIndex and expanded its quad: %u %u %u",
           indirect_quad[0], indirect_quad[1], indirect_quad[2]);
+    const uint8_t *base_vertex_quad = px + (32 * 64 + 8) * 4;
+    const uint8_t *base_vertex_unaffected = px + (32 * 64 + 56) * 4;
+    CHECK(base_vertex_quad[0] > 200 && base_vertex_quad[2] < 40 &&
+          base_vertex_unaffected[2] > 200 && base_vertex_unaffected[0] < 40,
+          "expanded uint8 quad preserves baseVertex=3 and leaves unrelated geometry clear: left %u %u %u right %u %u %u",
+          base_vertex_quad[0], base_vertex_quad[1], base_vertex_quad[2],
+          base_vertex_unaffected[0], base_vertex_unaffected[1], base_vertex_unaffected[2]);
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN INDEXED DRAW TEST FAILED" : "NVN INDEXED DRAW TEST PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }

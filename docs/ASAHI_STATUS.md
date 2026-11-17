@@ -32,7 +32,9 @@ development environment, so the first real game bring-up is still open.
   packaged SPIR-V skip the NVN shader chain and pass their modules to the guest
   Vulkan path. Runtime-generated Vulkan SPIR-V can be captured on Linux and
   validated into a descriptor, specialization and pipeline-layout inventory
-  for the game package.
+  for the game package. NVN titles that compile GLSL through GLSLC can capture
+  outputs on Linux in a first `--skip-shaders` run, then validate and consume
+  those files on re-import.
   Pipeline-state precompilation from those captures is not implemented. NUP and
   dump builds need no keys.
 - Graphical launcher: game library scan, keyboard navigation, per-game settings
@@ -146,14 +148,17 @@ window-specific part is swapchain creation, image acquisition and presentation.
 2. **Presentation validation.** Swapchain creation/present is implemented but
    not exercised in a real desktop session.
 3. **NVN2 mesh/task stages**, bindless pools, runtime and UBO/c2 descriptor
-   arrays, storage-image atomics, transform feedback, sparse pools and DLSS
-   equivalents are not replayed. They are refused with a red line. Fixed
-   direct texture/sampler arrays are replayed element-by-element. Advanced blend modes beyond the
-   fixed-function Porter-Duff set (multiply, screen, overlay, HSL and the other
-   shader-dependent modes) are not applied; they fall back to the state's blend
-   functions with a red line. Alpha test, logic operations, Porter-Duff
-   advanced blend and the geometry input-topology variants are implemented and
-   tested synthetically.
+   arrays, transform feedback, sparse pools and DLSS equivalents remain
+   unsupported and are refused with a red line. Fixed direct texture/sampler
+   arrays are replayed element-by-element. Compute storage-image atomics have
+   synthetic Honeykrisp coverage for R32UI imageAtomicAdd and R32I
+   imageAtomicAdd/imageAtomicOr; this does not cover every format or
+   operation. NVN advanced blend equations map to the Vulkan advanced blend
+   extension when queried capabilities and state permit it, with synthetic
+   coverage for Porter-Duff plus multiply, screen, overlay and difference.
+   NVN's free-range normalized-destination setting still falls back. Alpha
+   test, logic operations and the geometry input-topology variants are tested
+   synthetically.
 4. **Multi-game single binary.** The host is compiled for one game profile;
    the launcher selects a per-profile runtime binary (`nxnative-<title id>`) or
    the generic `nxnative-asahi`. Building one binary that loads any profile at

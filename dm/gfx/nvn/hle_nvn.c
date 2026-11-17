@@ -1610,19 +1610,19 @@ static p_bind_handles *bind_handles_ex(NVNcommandBuffer *c, int op, int st, int 
     n = slots_bound(op == OP_BIND_SAMP ? "BindSamplers" : op == OP_BIND_IMG ? "BindImages" : "BindTextures", st, first, n,
                     op == OP_BIND_SAMP ? DMSH_C2_SEP_SLOTS : op == OP_BIND_IMG ? 32 : NVN_SEPTEX_SLOT0 + DMSH_C2_SEP_SLOTS);
     if (!n) return NULL;
-    p_bind_handles tmp, *r;
-    if (compact && g_rec_compact && (unsigned)st < 8 && first >= 0 && first <= 0xff && n >= 1) r = &tmp;
-    else r = RECN(c, op, p_bind_handles, h, n);
+    if (compact && g_rec_compact && (unsigned)st < 8 && first >= 0 && first <= 0xff && n >= 1) {
+        // This form is emitted directly into the compact command stream; no
+        // canonical p_bind_handles record exists to return to the caller.
+        uint8_t *q = crec(c, OPC_HANDLES, (uint32_t)op | (uint32_t)st << 6 | (uint32_t)first << 9 | (uint32_t)n << 17, 4 * (size_t)n);
+        for (int i = 0; i < n; i++) put32(&q, (uint32_t)h[i]);
+        return NULL;
+    }
+    p_bind_handles *r = RECN(c, op, p_bind_handles, h, n);
     r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0;
     // The driver writes each handle into the c2 table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half of the 64-bit handle.
     // EA SPORTS FC 27 binds separate textures with bit 32 set (0x1000001d1): read whole, its sampler ID was 4096, beyond any pool, where the GPU reads sampler 0
     for (int i = 0; i < n; i++) r->h[i] = (uint32_t)h[i];
     // Descriptor indices belong to the pools active at execution, including pools inherited from a caller or an earlier submission. Keep the hardware's relative handles.
-    if (r == &tmp) {
-        uint8_t *q = crec(c, OPC_HANDLES, (uint32_t)op | (uint32_t)st << 6 | (uint32_t)first << 9 | (uint32_t)n << 17, 4 * (size_t)n);
-        for (int i = 0; i < n; i++) put32(&q, (uint32_t)r->h[i]);
-        return NULL;
-    }
     return r;
 }
 static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) { return bind_handles_ex(c, op, st, first, n, h, 1); }

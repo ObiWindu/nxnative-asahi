@@ -177,6 +177,72 @@ int main(void) {
         printf("FAIL: malformed SPIR-V instruction stream was accepted\n");
         return 1;
     }
+
+    // The Vulkan layout has a fixed descriptor table. A cache shader with one
+    // more binding must fail with a useful error rather than being accepted
+    // with its final binding silently dropped.
+    enum { TOO_MANY_BINDINGS = 65 };
+    size_t source_cap = 32768, source_len = 0;
+    char *many_bindings_src = malloc(source_cap);
+    if (!many_bindings_src) { printf("FAIL: allocate oversized descriptor shader\n"); return 1; }
+    source_len += (size_t)snprintf(many_bindings_src + source_len, source_cap - source_len,
+                                   "#version 450\nlayout(location=0) out vec4 outColor;\n");
+    for (int i = 0; i < TOO_MANY_BINDINGS; i++) {
+        int nwrite = snprintf(many_bindings_src + source_len, source_cap - source_len,
+                              "layout(set=0,binding=%d) uniform sampler2D tex%d;\n", i, i);
+        if (nwrite < 0 || (size_t)nwrite >= source_cap - source_len) {
+            free(many_bindings_src);
+            printf("FAIL: build oversized descriptor shader declarations\n");
+            return 1;
+        }
+        source_len += (size_t)nwrite;
+    }
+    int nwrite = snprintf(many_bindings_src + source_len, source_cap - source_len, "void main(){");
+    if (nwrite < 0 || (size_t)nwrite >= source_cap - source_len) {
+        free(many_bindings_src);
+        printf("FAIL: build oversized descriptor shader body\n");
+        return 1;
+    }
+    source_len += (size_t)nwrite;
+    for (int i = 0; i < TOO_MANY_BINDINGS; i++) {
+        nwrite = snprintf(many_bindings_src + source_len, source_cap - source_len,
+                          "outColor %s texture(tex%d,vec2(0.5));", i ? "+=" : "=", i);
+        if (nwrite < 0 || (size_t)nwrite >= source_cap - source_len) {
+            free(many_bindings_src);
+            printf("FAIL: build oversized descriptor shader uses\n");
+            return 1;
+        }
+        source_len += (size_t)nwrite;
+    }
+    nwrite = snprintf(many_bindings_src + source_len, source_cap - source_len, "}\n");
+    if (nwrite < 0 || (size_t)nwrite >= source_cap - source_len) {
+        free(many_bindings_src);
+        printf("FAIL: finish oversized descriptor shader\n");
+        return 1;
+    }
+    source_len += (size_t)nwrite;
+    shaderc_compilation_result_t fm = compile(c, many_bindings_src, source_len, 1, "t.too_many.frag", "main", o);
+    free(many_bindings_src);
+    if (!fm || status(fm) != 0) {
+        printf("FAIL: shaderc oversized descriptor compile: %s\n", fm ? errmsg(fm) : "no result");
+        return 1;
+    }
+    const char *many_key = "3333333333333333";
+    snprintf(path, sizeof path, "%s/%s_b.spv", dir, many_key);
+    f = fopen(path, "wb");
+    if (!f || fwrite(bytes(fm), 1, length(fm), f) != length(fm)) {
+        if (f) fclose(f);
+        printf("FAIL: write oversized descriptor SPIR-V\n");
+        return 1;
+    }
+    fclose(f);
+    nvn_shader excessive;
+    if (nvn_shader_load(dir, many_key, &excessive) == 0 ||
+        !strstr(excessive.load_error, "unsupported or excessive descriptor bindings")) {
+        printf("FAIL: shader with %d bindings was accepted or lost its rejection diagnostic: %s\n",
+               TOO_MANY_BINDINGS, excessive.load_error);
+        return 1;
+    }
     printf("SHADER CACHE TEST PASSED\n");
     return 0;
 }

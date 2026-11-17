@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
     int rc = 1;
 
     if (nx_vk_create_image(&vk, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, (VkExtent3D){W, H, 1}, 1, 1, 1,
-                           VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                           VK_IMAGE_TILING_OPTIMAL, 0, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                            VK_IMAGE_LAYOUT_UNDEFINED, &img, &img_mem) != 0) goto fail;
     if (nx_vk_create_buffer(&vk, W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                             &rbuf, &rmem, NULL) != 0) goto fail;

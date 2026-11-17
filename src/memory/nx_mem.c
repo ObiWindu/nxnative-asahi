@@ -148,6 +148,8 @@ void nx_mem_destroy(NxMemRange *r) {
 
 NxMemAlias *nx_mem_alias_create(size_t size) {
     size_t hp = nx_host_page_size();
+    if (!size) { errno = EINVAL; return NULL; }
+    if (size > SIZE_MAX - (hp - 1)) { errno = EOVERFLOW; return NULL; }
     size = (size + hp - 1) & ~(hp - 1);
     int fd = (int)syscall(SYS_memfd_create, "nxnative-guest", MFD_CLOEXEC);
     if (fd < 0) { nx_log(NX_LOG_ERROR, "memfd_create failed: %s", strerror(errno)); return NULL; }
@@ -159,9 +161,17 @@ NxMemAlias *nx_mem_alias_create(size_t size) {
 }
 
 void *nx_mem_alias_map(NxMemAlias *a, uintptr_t addr, size_t size, int prot) {
-    if (!a) return NULL;
-    if (size > a->size) size = a->size;
-    void *p = mmap((void *)addr, size, prot, MAP_SHARED | (addr ? MAP_FIXED_NOREPLACE : 0), a->fd, 0);
+    return nx_mem_alias_map_at(a, addr, size, 0, prot);
+}
+
+void *nx_mem_alias_map_at(NxMemAlias *a, uintptr_t addr, size_t size, size_t backing_offset, int prot) {
+    size_t hp = nx_host_page_size();
+    if (!a || !size || (backing_offset & (hp - 1)) || backing_offset > a->size || size > a->size - backing_offset) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (addr && (addr & (hp - 1))) { errno = EINVAL; return NULL; }
+    void *p = mmap((void *)addr, size, prot, MAP_SHARED | (addr ? MAP_FIXED_NOREPLACE : 0), a->fd, (off_t)backing_offset);
     if (p == MAP_FAILED) { nx_log(NX_LOG_ERROR, "alias mmap at %p (%zu) failed: %s", (void *)addr, size, strerror(errno)); return NULL; }
     return p;
 }

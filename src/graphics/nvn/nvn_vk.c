@@ -314,7 +314,10 @@ static tex_ent *tex_ensure(const tex_t *t) {
                                         : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D;
     VkExtent3D extent = {w, h, is3d && t->d.depth ? t->d.depth : 1};
-    if (nx_vk_create_image(&g_vk, is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, e->fmt, extent, levels, layers, samples, VK_IMAGE_TILING_OPTIMAL,
+    VkImageCreateFlags image_flags = is3d && g_vk.caps.api_version >= VK_API_VERSION_1_1 &&
+        g_vk.caps.image_2d_view_of_3d
+        ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0;
+    if (nx_vk_create_image(&g_vk, is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, e->fmt, extent, levels, layers, samples, VK_IMAGE_TILING_OPTIMAL, image_flags,
                            usage, VK_IMAGE_LAYOUT_UNDEFINED, &e->img, &e->mem) != 0) return NULL;
     VkImageAspectFlags aspect = depth_fmt ? ((t->d.format == NVN_FORMAT_DEPTH24_STENCIL8 || t->d.format == NVN_FORMAT_DEPTH32F_STENCIL8 || t->d.format == NVN_FORMAT_STENCIL8) ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) : VK_IMAGE_ASPECT_DEPTH_BIT) : VK_IMAGE_ASPECT_COLOR_BIT;
     if (t->d.format == NVN_FORMAT_STENCIL8) aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
@@ -329,36 +332,7 @@ static tex_ent *tex_ensure(const tex_t *t) {
     return e;
 }
 
-static void clear_texture(const tex_t *t, const p_clear_color *c) {
-    tex_ent *e = tex_ensure(t);
-    if (!e) return;
-    VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
-    if (!cb) return;
-    VkImageSubresourceRange range = tex_subresources(e);
-    VkImageMemoryBarrier b = {0};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = e->img; b.subresourceRange = range;
-    b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
-    VkClearColorValue v;
-    int integer = e->fmt == VK_FORMAT_R8_UINT || e->fmt == VK_FORMAT_R8G8_UINT || e->fmt == VK_FORMAT_R8G8B8_UINT || e->fmt == VK_FORMAT_R8G8B8A8_UINT ||
-                  e->fmt == VK_FORMAT_R16_UINT || e->fmt == VK_FORMAT_R16G16_UINT || e->fmt == VK_FORMAT_R16G16B16_UINT || e->fmt == VK_FORMAT_R16G16B16A16_UINT ||
-                  e->fmt == VK_FORMAT_R32_UINT || e->fmt == VK_FORMAT_R32G32_UINT || e->fmt == VK_FORMAT_R32G32B32_UINT || e->fmt == VK_FORMAT_R32G32B32A32_UINT ||
-                  e->fmt == VK_FORMAT_R8_SINT || e->fmt == VK_FORMAT_R8G8_SINT || e->fmt == VK_FORMAT_R8G8B8_SINT || e->fmt == VK_FORMAT_R8G8B8A8_SINT ||
-                  e->fmt == VK_FORMAT_R16_SINT || e->fmt == VK_FORMAT_R16G16_SINT || e->fmt == VK_FORMAT_R16G16B16_SINT || e->fmt == VK_FORMAT_R16G16B16A16_SINT ||
-                  e->fmt == VK_FORMAT_R32_SINT || e->fmt == VK_FORMAT_R32G32_SINT || e->fmt == VK_FORMAT_R32G32B32_SINT || e->fmt == VK_FORMAT_R32G32B32A32_SINT;
-    if (integer) for (int k = 0; k < 4; k++) v.uint32[k] = (uint32_t)c->rgba[k];
-    else memcpy(v.float32, c->rgba, sizeof v.float32);
-    vkCmdClearColorImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
-    nx_vk_oneshot_end(&g_vk, cb);
-    e->layout = VK_IMAGE_LAYOUT_GENERAL;
-    e->gpu_dirty = 1;
-}
+static void clear_color_record(const p_clear_color *c);
 
 static void pool_find(uint64_t addr, uint64_t len, pool_ent **out) {
     *out = NULL;
@@ -802,8 +776,7 @@ void mtl_exec(const uint8_t *p) {
         case OP_CLEAR_COLOR: {
             const p_clear_color *c = (const p_clear_color *)a;
             if (c->index >= 0 && c->index < g_rt.n && g_rt.color[c->index]) {
-                tex_t *t = (tex_t *)g_rt.color[c->index];
-                clear_texture(t, c);
+                clear_color_record(c);
             }
             break;
         }
@@ -816,22 +789,126 @@ void mtl_exec(const uint8_t *p) {
             if (!g_rt.depth) break;
             tex_ent *e = tex_ensure(g_rt.depth);
             if (!e) break;
+            VkImageAspectFlags clear_aspects = 0;
+            if (c->depth_mask && (e->aspect & VK_IMAGE_ASPECT_DEPTH_BIT))
+                clear_aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+            uint32_t stencil_mask = (uint32_t)c->stencil_mask & 0xff;
+            if (stencil_mask && !(e->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) {
+                LOG("[RED] [nvn/vk] stencil clear requested for a depth-only attachment"); break;
+            }
+            if (stencil_mask && stencil_mask != 0xff) {
+                LOG("[RED] [nvn/vk] partial stencil-bit clear mask %#x is unsupported", stencil_mask); break;
+            }
+            if (stencil_mask) clear_aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            if (!clear_aspects) break;
+            uint32_t mip = g_rt.has_dview && g_rt.dview.set_levels ? g_rt.dview.base_level : 0;
+            uint32_t base_layer = g_rt.has_dview && g_rt.dview.set_layers ? g_rt.dview.min_layer : 0;
+            uint32_t layer_count = g_rt.has_dview && g_rt.dview.set_layers ? g_rt.dview.nlayers : e->layers;
+            if (mip >= e->levels || base_layer >= e->layers || !layer_count || layer_count > e->layers - base_layer) {
+                LOG("[RED] [nvn/vk] depth/stencil clear attachment view is out of range"); break;
+            }
+            uint32_t width = (uint32_t)g_rt.depth->d.width >> mip;
+            uint32_t height = (uint32_t)g_rt.depth->d.height >> mip;
+            if (!width) width = 1;
+            if (!height) height = 1;
+            int64_t x0 = g_st.has_scissor ? g_st.sc_x : 0;
+            int64_t y0 = g_st.has_scissor ? g_st.sc_y : 0;
+            int64_t x1 = g_st.has_scissor ? x0 + g_st.sc_w : width;
+            int64_t y1 = g_st.has_scissor ? y0 + g_st.sc_h : height;
+            if (g_st.has_scissor && (g_st.sc_w < 0 || g_st.sc_h < 0)) {
+                LOG("[RED] [nvn/vk] depth/stencil clear has a negative scissor extent"); break;
+            }
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > width) x1 = width;
+            if (y1 > height) y1 = height;
+            if (x1 <= x0 || y1 <= y0) break;
             VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
             if (!cb) break;
-            VkImageMemoryBarrier b = {0};
-            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = e->img; b.subresourceRange = tex_subresources(e);
-            b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
-            VkClearDepthStencilValue v = {c->depth, (uint32_t)c->stencil};
-            vkCmdClearDepthStencilImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &b.subresourceRange);
-            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-            b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+            float depth = c->depth;
+            if (!(depth >= 0.0f)) depth = 0.0f;
+            else if (depth > 1.0f) depth = 1.0f;
+            VkClearDepthStencilValue v = {depth, (uint32_t)c->stencil & 0xff};
+            VkImageSubresourceRange range = {clear_aspects, mip, 1, base_layer, layer_count};
+            int is_3d = g_rt.depth->d.target == NVN_TEXTURE_TARGET_3D;
+            uint32_t slice_count = is_3d ? (uint32_t)g_rt.depth->d.depth >> mip : 1;
+            if (!slice_count) slice_count = 1;
+            int rectangular_clear = x0 != 0 || y0 != 0 || x1 != width || y1 != height;
+            if (rectangular_clear) {
+                if (is_3d && !g_vk.caps.image_2d_view_of_3d) {
+                    nx_vk_oneshot_end(&g_vk, cb);
+                    LOG("[RED] [nvn/vk] partial depth/stencil 3D clear requires image2DViewOf3D"); break;
+                }
+                VkRenderPass rp = rp_get(0, NULL, e->fmt, e->samples);
+                if (!rp) {
+                    nx_vk_oneshot_end(&g_vk, cb);
+                    LOG("[RED] [nvn/vk] could not create depth/stencil clear render pass"); break;
+                }
+                VkImageMemoryBarrier b = {0};
+                b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = e->img; b.subresourceRange = range;
+                b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                b.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                                     0, 0, NULL, 0, NULL, 1, &b);
+                uint32_t slices = is_3d ? slice_count : 1;
+                int clear_ok = 1;
+                for (uint32_t slice = 0; slice < slices; slice++) {
+                    VkImageViewCreateInfo vi = {0};
+                    vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = e->img;
+                    vi.viewType = !is_3d && layer_count > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+                    vi.format = e->fmt;
+                    vi.subresourceRange = (VkImageSubresourceRange){clear_aspects, mip, 1,
+                        is_3d ? slice : base_layer, is_3d ? 1 : layer_count};
+                    VkImageView iv = VK_NULL_HANDLE;
+                    if (vkCreateImageView(g_vk.device, &vi, NULL, &iv) != VK_SUCCESS) {
+                        LOG("[RED] [nvn/vk] could not create depth/stencil clear image view");
+                        clear_ok = 0; break;
+                    }
+                    VkFramebuffer fb = VK_NULL_HANDLE;
+                    VkFramebufferCreateInfo fi = {0};
+                    fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fi.renderPass = rp;
+                    fi.attachmentCount = 1; fi.pAttachments = &iv; fi.width = width; fi.height = height;
+                    fi.layers = is_3d ? 1 : layer_count;
+                    if (vkCreateFramebuffer(g_vk.device, &fi, NULL, &fb) != VK_SUCCESS) {
+                        vkDestroyImageView(g_vk.device, iv, NULL);
+                        LOG("[RED] [nvn/vk] could not create depth/stencil clear framebuffer");
+                        clear_ok = 0; break;
+                    }
+                    VkRenderPassBeginInfo bi = {0};
+                    bi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; bi.renderPass = rp; bi.framebuffer = fb;
+                    bi.renderArea = (VkRect2D){{0, 0}, {width, height}};
+                    vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+                    VkClearAttachment ca = {0}; ca.aspectMask = clear_aspects; ca.clearValue.depthStencil = v;
+                    VkClearRect cr = {{{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}},
+                        0, is_3d ? 1 : layer_count};
+                    vkCmdClearAttachments(cb, 1, &ca, 1, &cr);
+                    vkCmdEndRenderPass(cb);
+                    vkDestroyFramebuffer(g_vk.device, fb, NULL); vkDestroyImageView(g_vk.device, iv, NULL);
+                }
+                if (!clear_ok) { nx_vk_oneshot_end(&g_vk, cb); break; }
+                e->layout = VK_IMAGE_LAYOUT_GENERAL;
+            } else {
+                VkImageMemoryBarrier b = {0};
+                b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = e->img; b.subresourceRange = range;
+                b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     0, 0, NULL, 0, NULL, 1, &b);
+                vkCmdClearDepthStencilImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+                b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                b.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                                     0, 0, NULL, 0, NULL, 1, &b);
+                e->layout = VK_IMAGE_LAYOUT_GENERAL;
+            }
             nx_vk_oneshot_end(&g_vk, cb);
-            e->layout = VK_IMAGE_LAYOUT_GENERAL; e->gpu_dirty = 1;
+            e->gpu_dirty = 1;
             break;
         }
         case OP_BARRIER: {

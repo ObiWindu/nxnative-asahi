@@ -77,7 +77,7 @@ int main(void) {
     vkGetPhysicalDeviceProperties(phys, &vk.caps.props);
     VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
     if (nx_vk_create_image(&vk, VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, (VkExtent3D){64, 64, 1}, 1, 1, 1,
-                           VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                           VK_IMAGE_TILING_OPTIMAL, 0, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                            VK_IMAGE_LAYOUT_UNDEFINED, &img, &mem) != 0) { printf("FAIL: source image\n"); return 1; }
     VkCommandBuffer cb = nx_vk_oneshot_begin(&vk);
     VkImageMemoryBarrier b = {0};

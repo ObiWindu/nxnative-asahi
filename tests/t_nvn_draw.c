@@ -51,16 +51,31 @@ int main(void) {
         "void main(){ gl_Position=vec4(pos,0,1); }\n";
     const char *fs_src =
         "#version 450\n"
-        "layout(set=0,binding=1,rgba8) uniform image2D storageOut;\n"
+        "layout(set=0,binding=1,rgba8) uniform image2D storageOut[2];\n"
         "layout(location=0) out vec4 outColor;\n"
-        "void main(){ outColor=vec4(1,0,0,1); imageStore(storageOut,ivec2(0),vec4(0,1,0,1)); }\n";
-    uint8_t *vsp = NULL, *fsp = NULL; size_t vsn = 0, fsn = 0;
-    if (compile_shader(lib, vs_src, 0, "t.vert", &vsp, &vsn) || compile_shader(lib, fs_src, 1, "t.frag", &fsp, &fsn)) {
+        "void main(){ outColor=vec4(1,0,0,1); imageStore(storageOut[0],ivec2(0),vec4(0,1,0,1)); imageStore(storageOut[1],ivec2(0),vec4(1,1,0,1)); }\n";
+    const char *vis_fs_src =
+        "#version 450\n"
+        "layout(set=0,binding=1,rgba8) readonly uniform image2D storageOut[2];\n"
+        "layout(location=0) out vec4 outColor;\n"
+        "void main(){ outColor=imageLoad(storageOut[0],ivec2(0)); }\n";
+    const char *compute_src =
+        "#version 450\n"
+        "layout(local_size_x=1,local_size_y=1,local_size_z=1) in;\n"
+        "layout(set=0,binding=1,rgba8) writeonly uniform image2D storageOut;\n"
+        "void main(){ imageStore(storageOut,ivec2(0),vec4(0,0,1,1)); }\n";
+    uint8_t *vsp = NULL, *fsp = NULL, *vis_fsp = NULL, *csp = NULL;
+    size_t vsn = 0, fsn = 0, vis_fsn = 0, csn = 0;
+    if (compile_shader(lib, vs_src, 0, "t.vert", &vsp, &vsn) ||
+        compile_shader(lib, fs_src, 1, "t.frag", &fsp, &fsn) ||
+        compile_shader(lib, vis_fs_src, 1, "t-vis.frag", &vis_fsp, &vis_fsn) ||
+        compile_shader(lib, compute_src, 2, "t-vis.comp", &csp, &csn)) {
         printf("FAIL: shaderc compile\n"); return 1;
     }
     // SHA-256 of 0x880 zero bytes, and of the same with byte 0 = 1: the keys
     // prog_key gives two zeroed control sections that differ in that byte.
     const char *vkey = "5626d9a8f1d7364b", *fkey = "b92a56c3b25472de";
+    const char *vis_fkey = "4764cc257d24a328", *ckey = "47688e9a0548daa4";
     char path[512];
     snprintf(path, sizeof path, "%s/%s_b.spv", dir, vkey);
     if (put(path, vsp, vsn)) { printf("FAIL: write vs\n"); return 1; }
@@ -72,6 +87,16 @@ int main(void) {
     snprintf(path, sizeof path, "%s/%s_b.json", dir, fkey);
     const char *fsjson = "{\"stage\":\"ps\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0}],\"vertex_inputs\":[],\"raster\":{\"colors\":[0]}}\n";
     if (put(path, fsjson, strlen(fsjson))) { printf("FAIL: write fs json\n"); return 1; }
+    snprintf(path, sizeof path, "%s/%s_b.spv", dir, vis_fkey);
+    if (put(path, vis_fsp, vis_fsn)) { printf("FAIL: write visibility fs\n"); return 1; }
+    snprintf(path, sizeof path, "%s/%s_b.json", dir, vis_fkey);
+    const char *vis_fsjson = "{\"stage\":\"ps\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0}],\"vertex_inputs\":[],\"raster\":{\"colors\":[0]}}\n";
+    if (put(path, vis_fsjson, strlen(vis_fsjson))) { printf("FAIL: write visibility fs json\n"); return 1; }
+    snprintf(path, sizeof path, "%s/%s_b.spv", dir, ckey);
+    if (put(path, csp, csn)) { printf("FAIL: write visibility compute shader\n"); return 1; }
+    snprintf(path, sizeof path, "%s/%s_b.json", dir, ckey);
+    const char *compute_json = "{\"stage\":\"cs\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0}],\"vertex_inputs\":[]}\n";
+    if (put(path, compute_json, strlen(compute_json))) { printf("FAIL: write visibility compute json\n"); return 1; }
 
     int g_fail = 0;
     NVNdeviceBuilder db; NVNdevice dev;
@@ -89,7 +114,7 @@ int main(void) {
     NVNF(nvnQueueBuilderSetQueueMemory)(&qb, qmem, qsz);
     CHECK(NVNF(nvnQueueInitialize)(&q, &qb) == 1, "queue initializes");
 
-    NVNtextureBuilder tb; NVNtexture tex;
+    NVNtextureBuilder tb; NVNtexture tex, visibility_tex;
     NVNF(nvnTextureBuilderSetDefaults)(&tb); NVNF(nvnTextureBuilderSetDevice)(&tb, &dev);
     NVNF(nvnTextureBuilderSetTarget)(&tb, NVN_TEXTURE_TARGET_2D);
     NVNF(nvnTextureBuilderSetSize2D)(&tb, 64, 64);
@@ -97,20 +122,30 @@ int main(void) {
     NVNF(nvnTextureBuilderSetFlags)(&tb, NVN_TEXTURE_FLAGS_LINEAR);
     NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0);
     CHECK(NVNF(nvnTextureInitialize)(&tex, &tb) == 1, "render target texture initializes");
-    NVNtexture image;
+    NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0xc0000);
+    CHECK(NVNF(nvnTextureInitialize)(&visibility_tex, &tb) == 1, "compute-to-graphics visibility target initializes");
+    NVNtexture image, image2;
     NVNF(nvnTextureBuilderSetSize2D)(&tb, 1, 1);
     NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0x4000);
     CHECK(NVNF(nvnTextureInitialize)(&image, &tb) == 1, "fragment storage image initializes");
+    NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0x5000);
+    CHECK(NVNF(nvnTextureInitialize)(&image2, &tb) == 1, "second fragment storage image initializes");
     NVNtexturePool tpool;
     CHECK(NVNF(nvnTexturePoolInitialize)(&tpool, &pool, 0x20000, 8) == 1, "texture pool initializes");
     NVNF(nvnTexturePoolRegisterImage)(&tpool, 1, &image, NULL);
+    NVNF(nvnTexturePoolRegisterImage)(&tpool, 2, &image2, NULL);
 
-    static uint8_t ctl_vs[0x880], ctl_ps[0x880];
-    ctl_ps[0] = 1;
-    NVNprogram prog;
+    static uint8_t ctl_vs[0x880], ctl_ps[0x880], ctl_vis_ps[0x880], ctl_vis_cs[0x880];
+    ctl_ps[0] = 1; ctl_vis_ps[0] = 2; ctl_vis_cs[0] = 8;
+    NVNprogram prog, vis_prog, compute_prog;
     CHECK(NVNF(nvnProgramInitialize)(&prog, &dev) == 1, "program initializes");
+    CHECK(NVNF(nvnProgramInitialize)(&vis_prog, &dev) == 1, "visibility graphics program initializes");
+    CHECK(NVNF(nvnProgramInitialize)(&compute_prog, &dev) == 1, "visibility compute program initializes");
     NVNshaderData sd[2] = {{0, ctl_vs}, {0, ctl_ps}};
     CHECK(NVNF(nvnProgramSetShaders)(&prog, 2, sd) == 1, "program takes the two stages");
+    NVNshaderData vis_sd[2] = {{0, ctl_vs}, {0, ctl_vis_ps}}, compute_sd[1] = {{0, ctl_vis_cs}};
+    CHECK(NVNF(nvnProgramSetShaders)(&vis_prog, 2, vis_sd) == 1, "visibility program takes vertex and fragment stages");
+    CHECK(NVNF(nvnProgramSetShaders)(&compute_prog, 1, compute_sd) == 1, "visibility program takes the compute stage");
 
     float *verts = (float *)(storage + 0x8000);
     verts[0] = -0.5f; verts[1] = -0.5f;
@@ -143,7 +178,8 @@ int main(void) {
     float blue[4] = {0, 0, 1, 1};
     NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
     NVNF(nvnCommandBufferBindProgram)(&cb, &prog, 3);
-    NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, (NVNimageHandle)1);
+    NVNimageHandle image_handles[2] = {(NVNimageHandle)1, (NVNimageHandle)2};
+    NVNF(nvnCommandBufferBindImages)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, 2, image_handles);
     NVNvertexAttribState va;
     NVNF(nvnVertexAttribStateSetDefaults)(&va);
     NVNF(nvnVertexAttribStateSetFormat)(&va, NVN_FORMAT_RG32F, 0);
@@ -155,6 +191,23 @@ int main(void) {
     NVNF(nvnVertexStreamStateSetDivisor)(&vs, 0);
     NVNF(nvnCommandBufferBindVertexStreamState)(&cb, 1, &vs);
     NVNF(nvnCommandBufferBindVertexBuffer)(&cb, 0, (NVNbufferAddress)(uintptr_t)(storage + 0x8000), 152);
+    // Compute writes a storage image, then a fragment shader reads it in a
+    // later draw. This catches missing compute→graphics image visibility even
+    // when the image stays in GENERAL layout throughout.
+    const NVNtexture *visibility_color[1] = {&visibility_tex};
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb, 1, visibility_color, NULL, NULL, NULL);
+    float black[4] = {0, 0, 0, 1};
+    NVNF(nvnCommandBufferClearColor)(&cb, 0, black, 0xf);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &compute_prog, 0);
+    NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNimageHandle)1);
+    NVNF(nvnCommandBufferDispatchCompute)(&cb, 1, 1, 1);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &vis_prog, 3);
+    NVNF(nvnCommandBufferBindImages)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, 2, image_handles);
+    NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb, 1, color, NULL, NULL, NULL);
+    NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog, 3);
+    NVNF(nvnCommandBufferBindImages)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, 2, image_handles);
     NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
     NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_QUADS, 3, 4);
     NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_POLYGON, 7, 4);
@@ -188,17 +241,23 @@ int main(void) {
     uint8_t px[64 * 64 * 4];
     NVNcopyRegion all = {0, 0, 0, 64, 64, 1};
     mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
-    uint8_t image_px[4];
+    uint8_t visibility_px[64 * 64 * 4];
+    mtl_read_texels(&visibility_tex, 0, 0, &all, visibility_px, 64 * 4, 64 * 4);
+    uint8_t image_px[4], image2_px[4];
     NVNcopyRegion one = {0, 0, 0, 1, 1, 1};
     mtl_read_texels(&image, 0, 0, &one, image_px, 4, 4);
+    mtl_read_texels(&image2, 0, 0, &one, image2_px, 4, 4);
     CHECK(image_px[1] > 200 && image_px[0] < 40 && image_px[2] < 40,
-          "fragment storage image write survives draw completion: %u %u %u %u", image_px[0], image_px[1], image_px[2], image_px[3]);
+          "fragment storage-image array element 0 survives draw completion: %u %u %u %u", image_px[0], image_px[1], image_px[2], image_px[3]);
+    CHECK(image2_px[0] > 200 && image2_px[1] > 200 && image2_px[2] < 40,
+          "fragment storage-image array element 1 survives draw completion: %u %u %u %u", image2_px[0], image2_px[1], image2_px[2], image2_px[3]);
     const uint8_t *corner = px;
     const uint8_t *indirect_tri = px + (32 * 64 + 32) * 4;
     const uint8_t *indirect_direct = px + (32 * 64 + 56) * 4;
     const uint8_t *suppressed = px + (8 * 64 + 32) * 4;
     const uint8_t *zero_instance = px + (51 * 64 + 32) * 4;
     const uint8_t *large_batch = px + (32 * 64 + 8) * 4;
+    const uint8_t *compute_graphics = visibility_px + (32 * 64 + 32) * 4;
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
     CHECK(indirect_direct[0] > 200 && indirect_direct[1] < 40 && indirect_direct[2] < 40,
           "ordinary indirect draw reached its target: %u %u %u", indirect_direct[0], indirect_direct[1], indirect_direct[2]);
@@ -210,6 +269,9 @@ int main(void) {
           "indirect instanceCount=0 produced no fragments: %u %u %u", zero_instance[0], zero_instance[1], zero_instance[2]);
     CHECK(large_batch[0] > 200 && large_batch[1] < 40 && large_batch[2] < 40,
           "large indirect-count batch drew its live quad: %u %u %u", large_batch[0], large_batch[1], large_batch[2]);
+    CHECK(compute_graphics[2] > 200 && compute_graphics[0] < 40 && compute_graphics[1] < 40,
+          "compute storage-image write is visible to a following graphics imageLoad: %u %u %u",
+          compute_graphics[0], compute_graphics[1], compute_graphics[2]);
     extern uint64_t mtl_present(const void *, double, const int *, uint64_t *);
     uint64_t copy = 0;
     uint64_t ticket = mtl_present(&tex, 1.0 / 60.0, NULL, &copy);

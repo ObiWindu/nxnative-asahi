@@ -56,6 +56,7 @@ void nx_mem_destroy(NxMemRange *r);
 // aliases, virtual memory pools, GPU-visible shared memory).
 NxMemAlias *nx_mem_alias_create(size_t size);
 void *nx_mem_alias_map(NxMemAlias *a, uintptr_t addr, size_t size, int prot);
+void *nx_mem_alias_map_at(NxMemAlias *a, uintptr_t addr, size_t size, size_t backing_offset, int prot);
 void nx_mem_alias_unmap(void *p, size_t size);
 void nx_mem_alias_destroy(NxMemAlias *a);
 

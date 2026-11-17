@@ -35,6 +35,16 @@ int main(void) {
         "layout(set=0,binding=1,rgba8) readonly uniform image2DArray imgs[2];\n"
         "layout(set=0,binding=2,std430) buffer Results { uint values[]; } result;\n"
         "void main(){ uint i=gl_GlobalInvocationID.x; vec4 v=imageLoad(imgs[i],ivec3(0,0,1)); result.values[i]=uint(v.r*255.0+0.5)|(uint(v.g*255.0+0.5)<<8); }\n";
+    const char *atomic_src =
+        "#version 450\n"
+        "layout(local_size_x=1,local_size_y=1,local_size_z=1) in;\n"
+        "layout(set=0,binding=1,r32ui) uniform uimage2D counter;\n"
+        "void main(){ imageAtomicAdd(counter,ivec2(0),3u); }\n";
+    const char *signed_atomic_src =
+        "#version 450\n"
+        "layout(local_size_x=1,local_size_y=1,local_size_z=1) in;\n"
+        "layout(set=0,binding=1,r32i) uniform iimage2D counters;\n"
+        "void main(){ imageAtomicAdd(counters,ivec2(0,0),-2); imageAtomicOr(counters,ivec2(1,0),3); }\n";
     void *(*ci)(void) = (void *)dlsym(lib, "shaderc_compiler_initialize");
     void *(*oi)(void) = (void *)dlsym(lib, "shaderc_compile_options_initialize");
     void *(*co)(void *, const char *, size_t, int, const char *, const char *, void *) = (void *)dlsym(lib, "shaderc_compile_into_spv");
@@ -46,12 +56,25 @@ int main(void) {
     if (!res || st(res) != 0) { printf("FAIL: shaderc compile\n"); return 1; }
     void *read_res = co(ci(), read_src, strlen(read_src), 2, "t-read.comp", "main", oi());
     if (!read_res || st(read_res) != 0) { printf("FAIL: shaderc readback compile\n"); return 1; }
+    void *atomic_res = co(ci(), atomic_src, strlen(atomic_src), 2, "t-atomic.comp", "main", oi());
+    if (!atomic_res || st(atomic_res) != 0) { printf("FAIL: shaderc image atomic compile\n"); return 1; }
+    void *signed_atomic_res = co(ci(), signed_atomic_src, strlen(signed_atomic_src), 2, "t-signed-atomic.comp", "main", oi());
+    if (!signed_atomic_res || st(signed_atomic_res) != 0) { printf("FAIL: shaderc signed image atomic compile\n"); return 1; }
     const char *key = "0f825ad6733bf669";
     char path[512]; snprintf(path, sizeof path, "%s/%s_b.spv", dir, key);
     FILE *f = fopen(path, "wb");
     if (!f || fwrite(by(res), 1, le(res), f) != le(res)) { printf("FAIL: write spv\n"); return 1; }
     fclose(f);
     snprintf(path, sizeof path, "%s/%s_b.json", dir, key);
+    f = fopen(path, "w");
+    fprintf(f, "{\"stage\":\"cs\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0}],\"vertex_inputs\":[]}\n");
+    fclose(f);
+    const char *signed_atomic_key = "796d5a5b25942564";
+    snprintf(path, sizeof path, "%s/%s_b.spv", dir, signed_atomic_key);
+    f = fopen(path, "wb");
+    if (!f || fwrite(by(signed_atomic_res), 1, le(signed_atomic_res), f) != le(signed_atomic_res)) { printf("FAIL: write signed atomic SPIR-V\n"); return 1; }
+    fclose(f);
+    snprintf(path, sizeof path, "%s/%s_b.json", dir, signed_atomic_key);
     f = fopen(path, "w");
     fprintf(f, "{\"stage\":\"cs\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0}],\"vertex_inputs\":[]}\n");
     fclose(f);
@@ -63,6 +86,15 @@ int main(void) {
     snprintf(path, sizeof path, "%s/%s_b.json", dir, read_key);
     f = fopen(path, "w");
     fprintf(f, "{\"stage\":\"cs\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0},{\"arg_id\":2,\"kind\":\"sbuf\",\"reg\":0}],\"vertex_inputs\":[]}\n");
+    fclose(f);
+    const char *atomic_key = "39e1708921e01391";
+    snprintf(path, sizeof path, "%s/%s_b.spv", dir, atomic_key);
+    f = fopen(path, "wb");
+    if (!f || fwrite(by(atomic_res), 1, le(atomic_res), f) != le(atomic_res)) { printf("FAIL: write atomic SPIR-V\n"); return 1; }
+    fclose(f);
+    snprintf(path, sizeof path, "%s/%s_b.json", dir, atomic_key);
+    f = fopen(path, "w");
+    fprintf(f, "{\"stage\":\"cs\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0}],\"vertex_inputs\":[]}\n");
     fclose(f);
 
     int g_fail = 0;
@@ -96,13 +128,34 @@ int main(void) {
     NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0x60000);
     CHECK(NVNF(nvnTextureInitialize)(&tex[1], &tb) == 1, "second image texture initializes");
     NVNF(nvnTexturePoolRegisterImage)(&tpool, 2, &tex[1], NULL);
-    static uint8_t ctl_write[0x880], ctl_read[0x880]; ctl_write[0] = 4; ctl_read[0] = 5;
-    NVNprogram prog_write, prog_read;
+    NVNtexture atomic_tex;
+    NVNF(nvnTextureBuilderSetTarget)(&tb, NVN_TEXTURE_TARGET_2D);
+    NVNF(nvnTextureBuilderSetSize2D)(&tb, 1, 1);
+    NVNF(nvnTextureBuilderSetLevels)(&tb, 1);
+    NVNF(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_R32UI);
+    NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0x80000);
+    CHECK(NVNF(nvnTextureInitialize)(&atomic_tex, &tb) == 1, "R32UI image atomic target initializes");
+    NVNF(nvnTexturePoolRegisterImage)(&tpool, 3, &atomic_tex, NULL);
+    NVNtexture signed_atomic_tex;
+    NVNF(nvnTextureBuilderSetSize2D)(&tb, 2, 1);
+    NVNF(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_R32I);
+    NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0xa0000);
+    CHECK(NVNF(nvnTextureInitialize)(&signed_atomic_tex, &tb) == 1, "R32I image atomic target initializes");
+    NVNF(nvnTexturePoolRegisterImage)(&tpool, 4, &signed_atomic_tex, NULL);
+    static uint8_t ctl_write[0x880], ctl_read[0x880], ctl_atomic[0x880], ctl_signed_atomic[0x880];
+    ctl_write[0] = 4; ctl_read[0] = 5; ctl_atomic[0] = 6; ctl_signed_atomic[0] = 7;
+    NVNprogram prog_write, prog_read, prog_atomic, prog_signed_atomic;
     CHECK(NVNF(nvnProgramInitialize)(&prog_write, &dev) == 1, "write program initializes");
     CHECK(NVNF(nvnProgramInitialize)(&prog_read, &dev) == 1, "read program initializes");
+    CHECK(NVNF(nvnProgramInitialize)(&prog_atomic, &dev) == 1, "image atomic program initializes");
+    CHECK(NVNF(nvnProgramInitialize)(&prog_signed_atomic, &dev) == 1, "signed image atomic program initializes");
     NVNshaderData sd_write[1] = {{0, ctl_write}}, sd_read[1] = {{0, ctl_read}};
+    NVNshaderData sd_atomic[1] = {{0, ctl_atomic}};
+    NVNshaderData sd_signed_atomic[1] = {{0, ctl_signed_atomic}};
     CHECK(NVNF(nvnProgramSetShaders)(&prog_write, 1, sd_write) == 1, "write program takes the compute stage");
     CHECK(NVNF(nvnProgramSetShaders)(&prog_read, 1, sd_read) == 1, "read program takes the compute stage");
+    CHECK(NVNF(nvnProgramSetShaders)(&prog_atomic, 1, sd_atomic) == 1, "atomic program takes the compute stage");
+    CHECK(NVNF(nvnProgramSetShaders)(&prog_signed_atomic, 1, sd_signed_atomic) == 1, "signed atomic program takes the compute stage");
     NVNcommandBuffer cb;
     CHECK(NVNF(nvnCommandBufferInitialize)(&cb, &dev) == 1, "command buffer initializes");
     NVNF(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0x10000, 0x10000);
@@ -125,16 +178,31 @@ int main(void) {
         (NVNbufferAddress)(uintptr_t)results, 2 * sizeof *results);
     NVNF(nvnCommandBufferBindProgram)(&cb, &prog_read, 0);
     NVNF(nvnCommandBufferDispatchCompute)(&cb, 2, 1, 1);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_atomic, 0);
+    NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNimageHandle)3);
+    NVNF(nvnCommandBufferDispatchCompute)(&cb, 4, 1, 1);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_signed_atomic, 0);
+    NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNimageHandle)4);
+    NVNF(nvnCommandBufferDispatchCompute)(&cb, 4, 1, 1);
     NVNcommandHandle h = NVNF(nvnCommandBufferEndRecording)(&cb);
     NVNF(nvnQueueSubmitCommands)(&q, 1, &h);
     NVNF(nvnQueueFinish)(&q);
     uint8_t px[2][16]; NVNcopyRegion all = {0, 0, 0, 2, 2, 1};
     mtl_read_texels(&tex[0], 0, 1, &all, px[0], 8, 16);
     mtl_read_texels(&tex[1], 0, 1, &all, px[1], 8, 16);
+    NVNcopyRegion atomic_region = {0, 0, 0, 1, 1, 1}; uint32_t atomic_value = 0;
+    mtl_read_texels(&atomic_tex, 0, 0, &atomic_region, (uint8_t *)&atomic_value, 4, 4);
+    NVNcopyRegion signed_atomic_region = {0, 0, 0, 2, 1, 1}; int32_t signed_atomic_values[2] = {0, 0};
+    mtl_read_texels(&signed_atomic_tex, 0, 0, &signed_atomic_region, (uint8_t *)signed_atomic_values, 8, 8);
     CHECK(px[0][0] > 200 && px[0][1] < 40 && px[0][2] < 40, "storage-image array element 0 contains red: %u %u %u %u", px[0][0], px[0][1], px[0][2], px[0][3]);
     CHECK(px[1][1] > 200 && px[1][0] < 40 && px[1][2] < 40, "storage-image array element 1 contains green: %u %u %u %u", px[1][0], px[1][1], px[1][2], px[1][3]);
     CHECK(results[0] == 255 && results[1] == (255u << 8),
           "following compute dispatch reads prior image writes: %#x %#x", results[0], results[1]);
+    CHECK(atomic_value == 12,
+          "four compute invocations atomically add to one storage-image texel: %u", atomic_value);
+    CHECK(signed_atomic_values[0] == -8 && signed_atomic_values[1] == 3,
+          "R32I imageAtomicAdd and imageAtomicOr preserve signed and bitwise results: %d %d",
+          signed_atomic_values[0], signed_atomic_values[1]);
     uint64_t barriers_after = 0;
     mtl_barrier_stats(NULL, &barriers_after);
     CHECK(barriers_after == barriers_before + 1,

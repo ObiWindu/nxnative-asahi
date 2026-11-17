@@ -217,15 +217,10 @@ static VkBlendOp vkbeq(int e) {
     default: return VK_BLEND_OP_ADD;
     }
 }
-// An advanced blend mode (blend_st.adv, hle_nvn.c) replaces the blend
-// functions. The Porter-Duff modes with uncorrelated overlap are sums of the
-// source and destination weighted by 1, 0, As, Ad and their complements, which
-// fixed-function factors give exactly; the result uses the ADD equation. A
-// source that is not premultiplied is multiplied by As first, which only a
-// source factor of ONE can take. The other modes (multiply, screen, overlay,
-// HSL, ...) need the destination colour in the shader and keep the state's own
-// functions, with a red line. This is the same mapping as the Metal host's
-// adv_blend.
+// Fixed-function fallback for the Porter-Duff advanced modes. The native
+// VK_EXT_blend_operation_advanced path below handles the complete equations
+// when the device capabilities and NVN state match. On other devices these
+// factors preserve the modes expressible with ordinary Vulkan blending.
 static blend_st adv_blend(blend_st b) {
     if (!b.adv) return b;
     enum { Z = NVN_BLEND_FUNC_ZERO, O = NVN_BLEND_FUNC_ONE, SA = NVN_BLEND_FUNC_SRC_ALPHA,
@@ -264,6 +259,71 @@ static blend_st adv_blend(blend_st b) {
     b.eq_rgb = b.eq_a = NVN_BLEND_EQUATION_ADD;
     return b;
 }
+// Vulkan advanced blend equations map directly to these NVN modes. Only use
+// them when the device reports all operations and supports the requested
+// overlap and premultiplication state.
+static int nvn_advanced_blend_op(unsigned mode, VkBlendOp *out) {
+    switch (mode) {
+    case NVN_BLEND_ADVANCED_MODE_ZERO: *out = VK_BLEND_OP_ZERO_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_SRC: *out = VK_BLEND_OP_SRC_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_DST: *out = VK_BLEND_OP_DST_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_SRC_OVER: *out = VK_BLEND_OP_SRC_OVER_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_DST_OVER: *out = VK_BLEND_OP_DST_OVER_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_SRC_IN: *out = VK_BLEND_OP_SRC_IN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_DST_IN: *out = VK_BLEND_OP_DST_IN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_SRC_OUT: *out = VK_BLEND_OP_SRC_OUT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_DST_OUT: *out = VK_BLEND_OP_DST_OUT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_SRC_ATOP: *out = VK_BLEND_OP_SRC_ATOP_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_DST_ATOP: *out = VK_BLEND_OP_DST_ATOP_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_XOR: *out = VK_BLEND_OP_XOR_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_PLUS: *out = VK_BLEND_OP_PLUS_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED: *out = VK_BLEND_OP_PLUS_CLAMPED_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED_ALPHA: *out = VK_BLEND_OP_PLUS_CLAMPED_ALPHA_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_PLUS_DARKER: *out = VK_BLEND_OP_PLUS_DARKER_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_MULTIPLY: *out = VK_BLEND_OP_MULTIPLY_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_SCREEN: *out = VK_BLEND_OP_SCREEN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_OVERLAY: *out = VK_BLEND_OP_OVERLAY_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_DARKEN: *out = VK_BLEND_OP_DARKEN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_LIGHTEN: *out = VK_BLEND_OP_LIGHTEN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_COLORDODGE: *out = VK_BLEND_OP_COLORDODGE_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_COLORBURN: *out = VK_BLEND_OP_COLORBURN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_HARDLIGHT: *out = VK_BLEND_OP_HARDLIGHT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_SOFTLIGHT: *out = VK_BLEND_OP_SOFTLIGHT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_DIFFERENCE: *out = VK_BLEND_OP_DIFFERENCE_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_MINUS: *out = VK_BLEND_OP_MINUS_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_MINUS_CLAMPED: *out = VK_BLEND_OP_MINUS_CLAMPED_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_EXCLUSION: *out = VK_BLEND_OP_EXCLUSION_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_CONTRAST: *out = VK_BLEND_OP_CONTRAST_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_INVERT: *out = VK_BLEND_OP_INVERT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_INVERT_RGB: *out = VK_BLEND_OP_INVERT_RGB_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_INVERT_OVG: *out = VK_BLEND_OP_INVERT_OVG_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_LINEARDODGE: *out = VK_BLEND_OP_LINEARDODGE_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_LINEARBURN: *out = VK_BLEND_OP_LINEARBURN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_VIVIDLIGHT: *out = VK_BLEND_OP_VIVIDLIGHT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_LINEARLIGHT: *out = VK_BLEND_OP_LINEARLIGHT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_PINLIGHT: *out = VK_BLEND_OP_PINLIGHT_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_HARDMIX: *out = VK_BLEND_OP_HARDMIX_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_RED: *out = VK_BLEND_OP_RED_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_GREEN: *out = VK_BLEND_OP_GREEN_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_BLUE: *out = VK_BLEND_OP_BLUE_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_HSL_HUE: *out = VK_BLEND_OP_HSL_HUE_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_HSL_SATURATION: *out = VK_BLEND_OP_HSL_SATURATION_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_HSL_COLOR: *out = VK_BLEND_OP_HSL_COLOR_EXT; return 1;
+    case NVN_BLEND_ADVANCED_MODE_HSL_LUMINOSITY: *out = VK_BLEND_OP_HSL_LUMINOSITY_EXT; return 1;
+    default: return 0;
+    }
+}
+
+static int nvn_advanced_blend_supported(blend_st b, int ncolor, VkBlendOp *op) {
+    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT *p = &g_vk.caps.advanced_blend_properties;
+    if (!b.adv || !nx_vk_supports_extension(&g_vk, VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME) ||
+        !p->advancedBlendAllOperations || ncolor > (int)p->advancedBlendMaxColorAttachments ||
+        (b.adv_npm && !p->advancedBlendNonPremultipliedSrcColor) ||
+        b.adv_dst_free || b.adv_ovl > NVN_BLEND_ADVANCED_OVERLAP_CONJOINT ||
+        (b.adv_ovl && !p->advancedBlendCorrelatedOverlap)) return 0;
+    return nvn_advanced_blend_op((unsigned)b.adv, op);
+}
+
 static VkPrimitiveTopology vktopo(int p) {
     switch (p) {
     case NVN_DRAW_PRIMITIVE_POINTS: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
@@ -521,7 +581,7 @@ static prog_vk *pvk_get(const prog_t *p) {
         }
     }
     // One descriptor set for all stages, each stage's bindings in its own range.
-    VkDescriptorSetLayoutBinding b[128]; int nb = 0;
+    VkDescriptorSetLayoutBinding b[64 * 6]; int nb = 0;
     for (int st = 0; st < 6; st++) if (pv->have[st]) {
         VkShaderStageFlags flags = st == 0 ? VK_SHADER_STAGE_VERTEX_BIT : st == 2 ? VK_SHADER_STAGE_GEOMETRY_BIT :
                                     st == 3 ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT : st == 4 ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT :
@@ -761,22 +821,42 @@ static VkPipeline pvk_pipeline(prog_vk *pv, VkRenderPass rp, int ncolor, const V
     dss.back.writeMask = g_st.st_wmask[1];
     dss.back.reference = (uint32_t)g_st.st_ref[1];
     int logic = ncolor > 0 && g_st.color.logic_op != NVN_LOGIC_OP_COPY;
-    blend_st bl = adv_blend(g_st.blend);
+    int blend_active = 0;
+    for (int i = 0; i < ncolor; i++) blend_active |= (g_st.color.blend_en >> i) & 1;
+    VkBlendOp advanced_op = VK_BLEND_OP_ADD;
+    int native_advanced = !logic && blend_active &&
+        nvn_advanced_blend_supported(g_st.blend, ncolor, &advanced_op);
+    blend_st bl = native_advanced ? g_st.blend : adv_blend(g_st.blend);
     VkPipelineColorBlendAttachmentState cba[8] = {{0}};
     for (int i = 0; i < ncolor; i++) {
         int on = (g_st.color.blend_en >> i) & 1;
         cba[i].blendEnable = (VkBool32)(!logic && on);   // a logic operation takes the place of blending
-        cba[i].srcColorBlendFactor = vkbfac(bl.src_rgb);
-        cba[i].dstColorBlendFactor = vkbfac(bl.dst_rgb);
-        cba[i].colorBlendOp = vkbeq(bl.eq_rgb);
-        cba[i].srcAlphaBlendFactor = vkbfac(bl.src_a);
-        cba[i].dstAlphaBlendFactor = vkbfac(bl.dst_a);
-        cba[i].alphaBlendOp = vkbeq(bl.eq_a);
+        if (native_advanced && on) {
+            cba[i].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[i].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba[i].colorBlendOp = advanced_op;
+            cba[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba[i].alphaBlendOp = advanced_op;
+        } else {
+            cba[i].srcColorBlendFactor = vkbfac(bl.src_rgb);
+            cba[i].dstColorBlendFactor = vkbfac(bl.dst_rgb);
+            cba[i].colorBlendOp = vkbeq(bl.eq_rgb);
+            cba[i].srcAlphaBlendFactor = vkbfac(bl.src_a);
+            cba[i].dstAlphaBlendFactor = vkbfac(bl.dst_a);
+            cba[i].alphaBlendOp = vkbeq(bl.eq_a);
+        }
         cba[i].colorWriteMask = (VkColorComponentFlags)((g_st.chmask.mask >> (4 * i)) & 0xf);
     }
+    VkPipelineColorBlendAdvancedStateCreateInfoEXT advanced_state = {0};
+    advanced_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT;
+    advanced_state.srcPremultiplied = !g_st.blend.adv_npm;
+    advanced_state.dstPremultiplied = VK_TRUE;
+    advanced_state.blendOverlap = (VkBlendOverlapEXT)g_st.blend.adv_ovl;
     VkPipelineColorBlendStateCreateInfo cbs = {0};
     cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cbs.attachmentCount = (uint32_t)ncolor; cbs.pAttachments = ncolor ? cba : NULL;
+    if (native_advanced) cbs.pNext = &advanced_state;
     if (logic) {
         cbs.logicOpEnable = VK_TRUE;
         cbs.logicOp = vklogic(g_st.color.logic_op);
@@ -1058,13 +1138,12 @@ static int bindless_sampler(int stage, int sreg, int soff, int *sid) {
     return -1;
 }
 
-#define NVN_DESC_INFO_CAP (160u * 256u)
 static int add_write(VkWriteDescriptorSet *w, VkDescriptorBufferInfo *bi, VkDescriptorImageInfo *ii, VkBufferView *bv,
-                     int *nw, VkDescriptorSet set, const nvn_desc_bind *d, hbuf *buffers, int *nbuf,
+                     int *nw, int write_cap, size_t info_cap, VkDescriptorSet set, const nvn_desc_bind *d,
                      size_t *buffer_info_at, size_t *image_info_at,
                      VkBuffer buf, VkDeviceSize range, VkImageView img, VkSampler samp, VkBufferView tbuf,
                      const VkDescriptorImageInfo *image_array) {
-    if (*nw >= 160) { LOG("[RED] [nvn/vk] descriptor write limit 160 exceeded"); return -1; }
+    if (*nw < 0 || *nw >= write_cap) { LOG("[RED] [nvn/vk] descriptor write storage exhausted (%d entries)", write_cap); return -1; }
     int wi = *nw;
     VkWriteDescriptorSet *x = &w[wi];
     memset(x, 0, sizeof *x);
@@ -1075,12 +1154,12 @@ static int add_write(VkWriteDescriptorSet *w, VkDescriptorBufferInfo *bi, VkDesc
         bv[wi] = tbuf;
         x->pTexelBufferView = &bv[wi];
     } else if (d->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || d->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || d->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC || d->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
-        if (*buffer_info_at > NVN_DESC_INFO_CAP || x->descriptorCount > NVN_DESC_INFO_CAP - *buffer_info_at) return -1;
+        if (*buffer_info_at > info_cap || x->descriptorCount > info_cap - *buffer_info_at) return -1;
         for (uint32_t i = 0; i < x->descriptorCount; i++) { bi[*buffer_info_at + i].buffer = buf; bi[*buffer_info_at + i].offset = 0; bi[*buffer_info_at + i].range = range; }
         x->pBufferInfo = &bi[*buffer_info_at];
         *buffer_info_at += x->descriptorCount;
     } else {
-        if (*image_info_at > NVN_DESC_INFO_CAP || x->descriptorCount > NVN_DESC_INFO_CAP - *image_info_at) return -1;
+        if (*image_info_at > info_cap || x->descriptorCount > info_cap - *image_info_at) return -1;
         if (image_array) x->pImageInfo = image_array;
         else {
             for (uint32_t i = 0; i < x->descriptorCount; i++) {
@@ -1091,7 +1170,6 @@ static int add_write(VkWriteDescriptorSet *w, VkDescriptorBufferInfo *bi, VkDesc
         }
         *image_info_at += x->descriptorCount;
     }
-    (void)buffers; (void)nbuf;
     (*nw)++;
     return 0;
 }
@@ -1300,10 +1378,12 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
     if (vkCreateFramebuffer(g_vk.device, &fci, NULL, &fb) != VK_SUCCESS) { nx_vk_oneshot_end(&g_vk, cb); return; }
 
     // Descriptors: one set for all stages, built from each stage's reflection.
-    uint32_t total = 0;
+    uint32_t total = 0, write_cap = 0;
     for (int st = 0; st < 6; st++) if (pv->have[st])
-        for (int i = 0; i < pv->sh[st].ndesc; i++)
+        for (int i = 0; i < pv->sh[st].ndesc; i++) {
             total += pv->sh[st].desc[i].count ? pv->sh[st].desc[i].count : 1;
+            write_cap++;
+        }
     VkDescriptorPoolSize ps[8] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, total + 8}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, total + 8},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, total + 8}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, total + 8},
@@ -1321,15 +1401,21 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (vkAllocateDescriptorSets(g_vk.device, &ai, &set) != VK_SUCCESS) { vkDestroyDescriptorPool(g_vk.device, pool, NULL); vkDestroyFramebuffer(g_vk.device, fb, NULL); nx_vk_oneshot_end(&g_vk, cb); return; }
 
-    VkWriteDescriptorSet wr[160]; VkBufferView bvs[160];
+    size_t write_slots = write_cap ? write_cap : 1;
+    VkWriteDescriptorSet *wr = calloc(write_slots, sizeof *wr);
+    VkBufferView *bvs = calloc(write_slots, sizeof *bvs);
+    hbuf *hb = calloc(write_slots, sizeof *hb);
+    VkBufferView *tbufs = calloc(write_slots, sizeof *tbufs);
     VkDescriptorBufferInfo *bi = calloc(total ? total : 1, sizeof *bi);
     VkDescriptorImageInfo *ii = calloc(total ? total : 1, sizeof *ii);
     nvn_image_use *image_uses = calloc(total ? total : 1, sizeof *image_uses);
     size_t nimage_uses = 0;
-    if (!bi || !ii || !image_uses) { free(bi); free(ii); free(image_uses); vkDestroyDescriptorPool(g_vk.device, pool, NULL); vkDestroyFramebuffer(g_vk.device, fb, NULL); nx_vk_oneshot_end(&g_vk, cb); return; }
-    VkBufferView tbufs[16]; int ntbuf = 0;
-    int nw = 0; size_t buffer_info_at = 0, image_info_at = 0;
-    hbuf hb[160]; int nhb = 0;
+    if (!wr || !bvs || !hb || !tbufs || !bi || !ii || !image_uses) {
+        free(wr); free(bvs); free(hb); free(tbufs); free(bi); free(ii); free(image_uses);
+        vkDestroyDescriptorPool(g_vk.device, pool, NULL); vkDestroyFramebuffer(g_vk.device, fb, NULL); nx_vk_oneshot_end(&g_vk, cb); return;
+    }
+    int ntbuf = 0;
+    int nw = 0, nhb = 0; size_t buffer_info_at = 0, image_info_at = 0;
     int ok = 1;
     for (int st = 0; st < 6 && ok; st++) if (pv->have[st]) {
         nvn_shader *sh = &pv->sh[st];
@@ -1339,7 +1425,7 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
             VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize range = VK_WHOLE_SIZE; VkImageView iv = VK_NULL_HANDLE; VkSampler sm = VK_NULL_HANDLE;
             if (!r) { LOG("[RED] [nvn/vk] shader %s binding %u has no reflection entry", sh->key, d->binding); ok = 0; break; }
             if (d->count > 1) {
-                if (nw >= 160) { LOG("[RED] [nvn/vk] descriptor write limit 160 exceeded"); ok = 0; break; }
+                if (nw >= (int)write_cap) { LOG("[RED] [nvn/vk] descriptor write storage exhausted (%u entries)", write_cap); ok = 0; break; }
                 VkDescriptorImageInfo *array = &ii[image_info_at];
                 for (uint32_t e = 0; e < d->count; e++) {
                     tex_ent *te = NULL;
@@ -1351,7 +1437,7 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
                                                 d->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) != 0) { ok = 0; break; }
                 }
                 if (!ok) break;
-                if (add_write(wr, bi, ii, bvs, &nw, set, d, hb, &nhb, &buffer_info_at, &image_info_at, buf, range, iv, sm, VK_NULL_HANDLE, array) != 0) { ok = 0; break; }
+                if (add_write(wr, bi, ii, bvs, &nw, (int)write_cap, total, set, d, &buffer_info_at, &image_info_at, buf, range, iv, sm, VK_NULL_HANDLE, array) != 0) { ok = 0; break; }
                 continue;
             }
             const char *kind = r->kind;
@@ -1432,7 +1518,7 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
                 bvi.buffer = b->buf; bvi.format = tf; bvi.offset = 0; bvi.range = bytes;
                 VkBufferView tv = VK_NULL_HANDLE;
                 if (vkCreateBufferView(g_vk.device, &bvi, NULL, &tv) != VK_SUCCESS) { ok = 0; break; }
-                if (ntbuf < 16) tbufs[ntbuf++] = tv;
+                if (ntbuf < (int)write_cap) tbufs[ntbuf++] = tv;
                 else { vkDestroyBufferView(g_vk.device, tv, NULL); ok = 0; break; }
             } else if (!strcmp(kind, "img_ubo")) {
                 uint32_t h = 0;
@@ -1463,7 +1549,7 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
                 bvi.buffer = b->buf; bvi.format = tf; bvi.offset = 0; bvi.range = bytes;
                 VkBufferView tv = VK_NULL_HANDLE;
                 if (vkCreateBufferView(g_vk.device, &bvi, NULL, &tv) != VK_SUCCESS) { ok = 0; break; }
-                if (ntbuf < 16) tbufs[ntbuf++] = tv; else { vkDestroyBufferView(g_vk.device, tv, NULL); ok = 0; break; }
+                if (ntbuf < (int)write_cap) tbufs[ntbuf++] = tv; else { vkDestroyBufferView(g_vk.device, tv, NULL); ok = 0; break; }
             } else if (!strcmp(kind, "tex_ubo")) {
                 uint32_t h = 0;
                 if (ubo_handle(st, r->reg, r->off, &h) != 0) { LOG("[RED] [nvn/vk] bindless texture handle at stage %d c[%d]+%#x is not in a bound uniform buffer", st, r->reg, r->off); ok = 0; break; }
@@ -1523,7 +1609,7 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
                 ok = 0; break;
             }
             VkBufferView tv = (ntbuf && !strcmp(kind, "tbuf")) ? tbufs[ntbuf - 1] : VK_NULL_HANDLE;
-            if (add_write(wr, bi, ii, bvs, &nw, set, d, hb, &nhb, &buffer_info_at, &image_info_at, buf, range, iv, sm, tv, NULL) != 0) { ok = 0; break; }
+            if (add_write(wr, bi, ii, bvs, &nw, (int)write_cap, total, set, d, &buffer_info_at, &image_info_at, buf, range, iv, sm, tv, NULL) != 0) { ok = 0; break; }
         }
     }
     if (ok && nw && nx_env_bool("NX_VK_DEBUG", 0)) {
@@ -1658,9 +1744,9 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
             if (image_uses[i].writable) image_uses[i].texture->gpu_dirty = 1;
     }
     nx_vk_oneshot_end(&g_vk, cb);
-    free(bi); free(ii); free(image_uses);
     for (int i = 0; i < ntbuf; i++) vkDestroyBufferView(g_vk.device, tbufs[i], NULL);
     for (int i = 0; i < nhb; i++) hbuf_free(&hb[i]);
+    free(wr); free(bvs); free(hb); free(tbufs); free(bi); free(ii); free(image_uses);
     for (int i = 0; i < nvb; i++) hbuf_free(&vb[i]);
     if (has_ib) hbuf_free(&ib);
     if (pool) vkDestroyDescriptorPool(g_vk.device, pool, NULL);
@@ -1769,6 +1855,7 @@ static void nvkd_dispatch(const p_dispatch *d) {
     nvn_shader *sh = &pv->sh[5];
     uint32_t desc_total = 0;
     for (int k = 0; k < sh->ndesc; k++) desc_total += sh->desc[k].count ? sh->desc[k].count : 1;
+    size_t write_slots = sh->ndesc ? (size_t)sh->ndesc : 1;
     VkDescriptorPoolSize ps[8] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, desc_total + 8}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, desc_total + 8},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, desc_total + 8}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, desc_total + 8},
@@ -1787,14 +1874,20 @@ static void nvkd_dispatch(const p_dispatch *d) {
     if (vkAllocateDescriptorSets(g_vk.device, &ai, &set) != VK_SUCCESS) { vkDestroyDescriptorPool(g_vk.device, pool, NULL); return; }
     VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
     if (!cb) { vkDestroyDescriptorPool(g_vk.device, pool, NULL); return; }
-    VkWriteDescriptorSet wr[160]; VkBufferView bvs[160];
+    VkWriteDescriptorSet *wr = calloc(write_slots, sizeof *wr);
+    VkBufferView *bvs = calloc(write_slots, sizeof *bvs);
+    hbuf *hb = calloc(write_slots, sizeof *hb);
+    VkBufferView *tbufs = calloc(write_slots, sizeof *tbufs);
     VkDescriptorBufferInfo *bi = calloc(desc_total ? desc_total : 1, sizeof *bi);
     VkDescriptorImageInfo *ii = calloc(desc_total ? desc_total : 1, sizeof *ii);
     nvn_image_use *images = calloc(desc_total ? desc_total : 1, sizeof *images);
-    if (!bi || !ii || !images) { free(bi); free(ii); free(images); nx_vk_oneshot_end(&g_vk, cb); vkDestroyDescriptorPool(g_vk.device, pool, NULL); return; }
-    VkBufferView tbufs[16]; int ntbuf = 0;
-    hbuf hb[128]; int nhb = 0, nw = 0, ok = 1; size_t buffer_info_at = 0, image_info_at = 0;
-    ssbo_out outs[32]; int nout = 0;
+    if (!wr || !bvs || !hb || !tbufs || !bi || !ii || !images) {
+        free(wr); free(bvs); free(hb); free(tbufs); free(bi); free(ii); free(images);
+        nx_vk_oneshot_end(&g_vk, cb); vkDestroyDescriptorPool(g_vk.device, pool, NULL); return;
+    }
+    int ntbuf = 0;
+    int nhb = 0, nw = 0, ok = 1; size_t buffer_info_at = 0, image_info_at = 0;
+    ssbo_out outs[64]; int nout = 0;
     size_t nimg = 0;
     for (int k = 0; k < sh->ndesc && ok; k++) {
         nvn_desc_bind *db = &sh->desc[k];
@@ -1802,7 +1895,7 @@ static void nvkd_dispatch(const p_dispatch *d) {
         VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize range = VK_WHOLE_SIZE; VkImageView iv = VK_NULL_HANDLE; VkSampler sm = VK_NULL_HANDLE;
         if (!r) { LOG("[RED] [nvn/vk] compute binding %u has no reflection entry", db->binding); ok = 0; break; }
         if (db->count > 1) {
-            if (nw >= 160) { LOG("[RED] [nvn/vk] descriptor write limit 160 exceeded"); ok = 0; break; }
+            if (nw >= (int)write_slots) { LOG("[RED] [nvn/vk] descriptor write storage exhausted (%zu entries)", write_slots); ok = 0; break; }
             VkDescriptorImageInfo *array = &ii[image_info_at];
             for (uint32_t e = 0; e < db->count; e++) {
                 tex_ent *te = NULL;
@@ -1817,7 +1910,7 @@ static void nvkd_dispatch(const p_dispatch *d) {
                 }
             }
             if (!ok) break;
-            if (add_write(wr, bi, ii, bvs, &nw, set, db, hb, &nhb, &buffer_info_at, &image_info_at, buf, range, iv, sm, VK_NULL_HANDLE, array) != 0) { ok = 0; break; }
+            if (add_write(wr, bi, ii, bvs, &nw, (int)write_slots, desc_total, set, db, &buffer_info_at, &image_info_at, buf, range, iv, sm, VK_NULL_HANDLE, array) != 0) { ok = 0; break; }
             continue;
         }
         const char *kind = r->kind;
@@ -1849,7 +1942,11 @@ static void nvkd_dispatch(const p_dispatch *d) {
             hbuf *b = &hb[nhb];
             if (hbuf_make(b, (const void *)(uintptr_t)g_st.ssbo[5][slot].addr, n) != 0) { ok = 0; break; }
             nhb++; buf = b->buf;
-            if (nout < 32) outs[nout++] = (ssbo_out){b, g_st.ssbo[5][slot].addr, n};
+            if (nout >= (int)(sizeof outs / sizeof *outs)) {
+                LOG("[RED] [nvn/vk] compute storage-buffer copyback capacity exceeded");
+                ok = 0; break;
+            }
+            outs[nout++] = (ssbo_out){b, g_st.ssbo[5][slot].addr, n};
         } else if (!strcmp(kind, "cbsize")) {
             uint32_t sz[DMSH_CBSIZE_SLOTS] = {0};
             for (int q = 0; q < DMSH_CBSIZE_SLOTS; q++) sz[q] = (uint32_t)g_st.ubo[5][q].size;
@@ -1884,7 +1981,7 @@ static void nvkd_dispatch(const p_dispatch *d) {
             bvi.buffer = b->buf; bvi.format = tf; bvi.offset = 0; bvi.range = bytes;
             VkBufferView tv = VK_NULL_HANDLE;
             if (vkCreateBufferView(g_vk.device, &bvi, NULL, &tv) != VK_SUCCESS) { ok = 0; break; }
-            if (ntbuf < 16) tbufs[ntbuf++] = tv; else { vkDestroyBufferView(g_vk.device, tv, NULL); ok = 0; break; }
+            if (ntbuf < (int)write_slots) tbufs[ntbuf++] = tv; else { vkDestroyBufferView(g_vk.device, tv, NULL); ok = 0; break; }
         } else if (!strcmp(kind, "img_ubo")) {
             uint32_t h = 0;
             if (ubo_handle(5, r->reg, r->off, &h) != 0) { LOG("[RED] [nvn/vk] compute bindless image handle at c[%d]+%#x is not in a bound uniform buffer", r->reg, r->off); ok = 0; break; }
@@ -1914,7 +2011,7 @@ static void nvkd_dispatch(const p_dispatch *d) {
             bvi.buffer = b->buf; bvi.format = tf; bvi.offset = 0; bvi.range = bytes;
             VkBufferView tv = VK_NULL_HANDLE;
             if (vkCreateBufferView(g_vk.device, &bvi, NULL, &tv) != VK_SUCCESS) { ok = 0; break; }
-            if (ntbuf < 16) tbufs[ntbuf++] = tv; else { vkDestroyBufferView(g_vk.device, tv, NULL); ok = 0; break; }
+            if (ntbuf < (int)write_slots) tbufs[ntbuf++] = tv; else { vkDestroyBufferView(g_vk.device, tv, NULL); ok = 0; break; }
         } else if (!strcmp(kind, "tex_ubo")) {
             uint32_t h = 0;
             if (ubo_handle(5, r->reg, r->off, &h) != 0) { LOG("[RED] [nvn/vk] compute bindless texture handle at c[%d]+%#x is not in a bound uniform buffer", r->reg, r->off); ok = 0; break; }
@@ -1971,7 +2068,7 @@ static void nvkd_dispatch(const p_dispatch *d) {
             ok = 0; break;
         }
         VkBufferView tv = (ntbuf && !strcmp(kind, "tbuf")) ? tbufs[ntbuf - 1] : VK_NULL_HANDLE;
-        if (add_write(wr, bi, ii, bvs, &nw, set, db, hb, &nhb, &buffer_info_at, &image_info_at, buf, range, iv, sm, tv, NULL) != 0) { ok = 0; break; }
+        if (add_write(wr, bi, ii, bvs, &nw, (int)write_slots, desc_total, set, db, &buffer_info_at, &image_info_at, buf, range, iv, sm, tv, NULL) != 0) { ok = 0; break; }
     }
     if (ok) for (size_t i = 0; i < nimg; i++)
         nvn_image_shader_barrier(cb, images[i].texture, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1997,7 +2094,7 @@ static void nvkd_dispatch(const p_dispatch *d) {
     for (int i = 0; i < ntbuf; i++) vkDestroyBufferView(g_vk.device, tbufs[i], NULL);
     for (int i = 0; i < nhb; i++) hbuf_free(&hb[i]);
     vkDestroyDescriptorPool(g_vk.device, pool, NULL);
-    free(bi); free(ii); free(images);
+    free(wr); free(bvs); free(hb); free(tbufs); free(bi); free(ii); free(images);
 }
 
 // ---------------------------------------------------------------------------
@@ -2189,6 +2286,106 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t rec_size) {
     hbuf_free(&staging);
     e->gpu_dirty = 1;
 }
+
+static void clear_color_record(const p_clear_color *c) {
+    if (!c || c->index < 0 || c->index >= g_rt.n || !g_rt.color[c->index]) return;
+    uint32_t mask = (uint32_t)c->mask & 0xf;
+    if (!mask) return;
+    if (mask != 0xf || (c->mask & ~0xf) != 0) {
+        LOG("[RED] [nvn/vk] partial attachment color clear mask %#x is unsupported", c->mask); return;
+    }
+    tex_t *t = (tex_t *)g_rt.color[c->index];
+    tex_ent *e = tex_ensure(t);
+    if (!e || e->aspect != VK_IMAGE_ASPECT_COLOR_BIT) return;
+    const view_t *view = g_rt.has_cview[c->index] ? &g_rt.cview[c->index] : NULL;
+    uint32_t mip = view && view->set_levels ? view->base_level : 0;
+    uint32_t base_layer = view && view->set_layers ? view->min_layer : 0;
+    uint32_t layers = view && view->set_layers ? view->nlayers : e->layers;
+    if (mip >= e->levels || base_layer >= e->layers || !layers || layers > e->layers - base_layer) {
+        LOG("[RED] [nvn/vk] color clear attachment view is out of range"); return;
+    }
+    uint32_t width = t->d.width >> mip, height = t->d.height >> mip;
+    if (!width) width = 1;
+    if (!height) height = 1;
+    int64_t x0 = g_st.has_scissor ? g_st.sc_x : 0;
+    int64_t y0 = g_st.has_scissor ? g_st.sc_y : 0;
+    int64_t x1 = g_st.has_scissor ? x0 + g_st.sc_w : width;
+    int64_t y1 = g_st.has_scissor ? y0 + g_st.sc_h : height;
+    if (g_st.has_scissor && (g_st.sc_w < 0 || g_st.sc_h < 0)) {
+        LOG("[RED] [nvn/vk] color clear has a negative scissor extent"); return;
+    }
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > width) x1 = width;
+    if (y1 > height) y1 = height;
+    if (x1 <= x0 || y1 <= y0) return;
+    int rectangular = x0 != 0 || y0 != 0 || x1 != width || y1 != height;
+    int integer = nvn_copy_numeric_class(t->d.format) == 2 || nvn_copy_numeric_class(t->d.format) == 3;
+    VkClearColorValue value = {0};
+    if (integer) for (int i = 0; i < 4; i++) value.uint32[i] = (uint32_t)c->rgba[i];
+    else memcpy(value.float32, c->rgba, sizeof value.float32);
+    VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
+    if (!cb) return;
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, base_layer, layers};
+    if (!rectangular) {
+        copy_transition(cb, e, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        vkCmdClearColorImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
+        copy_transition(cb, e, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+        nx_vk_oneshot_end(&g_vk, cb);
+        e->gpu_dirty = 1;
+        return;
+    }
+    int is_3d = t->d.target == NVN_TEXTURE_TARGET_3D;
+    if (is_3d && !g_vk.caps.image_2d_view_of_3d) {
+        nx_vk_oneshot_end(&g_vk, cb);
+        LOG("[RED] [nvn/vk] scissored color clear of a 3D texture requires image2DViewOf3D"); return;
+    }
+    VkFormat fmt = view && view->set_format ? vkfmt(view->format) : e->fmt;
+    if (fmt == VK_FORMAT_UNDEFINED) fmt = e->fmt;
+    VkRenderPass rp = rp_get(1, &fmt, VK_FORMAT_UNDEFINED, e->samples);
+    if (!rp) { nx_vk_oneshot_end(&g_vk, cb); LOG("[RED] [nvn/vk] could not create color-clear render pass"); return; }
+    copy_transition(cb, e, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+    uint32_t slices = is_3d ? (t->d.depth >> mip) : 1;
+    if (!slices) slices = 1;
+    for (uint32_t slice = 0; slice < slices; slice++) {
+        uint32_t view_layers = is_3d ? 1 : layers;
+        VkImageViewCreateInfo vi = {0};
+        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = e->img;
+        vi.viewType = !is_3d && view_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = fmt;
+        vi.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, mip, 1,
+            is_3d ? slice : base_layer, view_layers};
+        VkImageView iv = VK_NULL_HANDLE;
+        if (vkCreateImageView(g_vk.device, &vi, NULL, &iv) != VK_SUCCESS) {
+            nx_vk_oneshot_end(&g_vk, cb); LOG("[RED] [nvn/vk] could not create color-clear image view"); return;
+        }
+        VkFramebuffer fb = VK_NULL_HANDLE;
+        VkFramebufferCreateInfo fi = {0};
+        fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fi.renderPass = rp;
+        fi.attachmentCount = 1; fi.pAttachments = &iv; fi.width = width; fi.height = height; fi.layers = view_layers;
+        if (vkCreateFramebuffer(g_vk.device, &fi, NULL, &fb) != VK_SUCCESS) {
+            vkDestroyImageView(g_vk.device, iv, NULL); nx_vk_oneshot_end(&g_vk, cb);
+            LOG("[RED] [nvn/vk] could not create color-clear framebuffer"); return;
+        }
+        VkRenderPassBeginInfo bi = {0};
+        bi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; bi.renderPass = rp; bi.framebuffer = fb;
+        bi.renderArea = (VkRect2D){{0, 0}, {width, height}};
+        vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+        VkClearAttachment ca = {0}; ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        if (integer) memcpy(ca.clearValue.color.uint32, value.uint32, sizeof value.uint32);
+        else memcpy(ca.clearValue.color.float32, value.float32, sizeof value.float32);
+        VkClearRect cr = {{{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}, 0, view_layers};
+        vkCmdClearAttachments(cb, 1, &ca, 1, &cr);
+        vkCmdEndRenderPass(cb);
+        vkDestroyFramebuffer(g_vk.device, fb, NULL); vkDestroyImageView(g_vk.device, iv, NULL);
+    }
+    e->layout = VK_IMAGE_LAYOUT_GENERAL;
+    nx_vk_oneshot_end(&g_vk, cb);
+    e->gpu_dirty = 1;
+}
 static void copy_t2b(const p_copy_b2t *c, uint32_t rec_size) {
     if (!c || !c->tex || !c->src) return;
     size_t bpp = 0; VkFormat vf = VK_FORMAT_UNDEFINED;
@@ -2282,9 +2479,8 @@ static void copy_t2t(const p_copy_t2t *c) {
         (c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT |
                      NVN_COPY_FLAGS_MIRROR_Z_BIT)) != 0 ||
         (!resolve && (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT));
-    if ((c->flags & NVN_COPY_FLAGS_MIRROR_Z_BIT) && c->src->d.target != NVN_TEXTURE_TARGET_3D) {
-        LOG("[RED] [nvn/vk] texture copy mirror-Z on array layers is not supported"); return;
-    }
+    int mirror_array_z = (c->flags & NVN_COPY_FLAGS_MIRROR_Z_BIT) &&
+        c->src->d.target != NVN_TEXTURE_TARGET_3D;
     if (resolve && blit) {
         LOG("[RED] [nvn/vk] multisample resolve cannot scale or mirror"); return;
     }
@@ -2312,22 +2508,46 @@ static void copy_t2t(const p_copy_t2t *c) {
         rr.extent = sr.extent;
         vkCmdResolveImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rr);
     } else if (blit) {
-        VkImageBlit br = {0};
-        br.srcSubresource = sr.subresource; br.dstSubresource = dr.subresource;
-        br.srcOffsets[0] = sr.offset;
-        br.srcOffsets[1] = (VkOffset3D){sr.offset.x + (int32_t)sr.extent.width,
-                                         sr.offset.y + (int32_t)sr.extent.height,
-                                         sr.offset.z + (int32_t)sr.extent.depth};
-        br.dstOffsets[0] = dr.offset;
-        br.dstOffsets[1] = (VkOffset3D){dr.offset.x + (int32_t)dr.extent.width,
-                                         dr.offset.y + (int32_t)dr.extent.height,
-                                         dr.offset.z + (int32_t)dr.extent.depth};
-        if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { int32_t x = br.srcOffsets[0].x; br.srcOffsets[0].x = br.srcOffsets[1].x; br.srcOffsets[1].x = x; }
-        if (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) { int32_t y = br.srcOffsets[0].y; br.srcOffsets[0].y = br.srcOffsets[1].y; br.srcOffsets[1].y = y; }
-        if (c->flags & NVN_COPY_FLAGS_MIRROR_Z_BIT) { int32_t z = br.srcOffsets[0].z; br.srcOffsets[0].z = br.srcOffsets[1].z; br.srcOffsets[1].z = z; }
         VkFilter filter = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-        vkCmdBlitImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       d->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &br, filter);
+        if (mirror_array_z) {
+            // Array layers are not the Z extent of a Vulkan 2D image. Reverse
+            // source-layer selection explicitly while blitting each matching
+            // destination layer, preserving X/Y transforms and scaling.
+            for (uint32_t layer = 0; layer < sr.subresource.layerCount; layer++) {
+                VkImageBlit br = {0};
+                br.srcSubresource = sr.subresource; br.dstSubresource = dr.subresource;
+                br.srcSubresource.baseArrayLayer += sr.subresource.layerCount - 1 - layer;
+                br.srcSubresource.layerCount = 1;
+                br.dstSubresource.baseArrayLayer += layer;
+                br.dstSubresource.layerCount = 1;
+                br.srcOffsets[0] = sr.offset;
+                br.srcOffsets[1] = (VkOffset3D){sr.offset.x + (int32_t)sr.extent.width,
+                                                 sr.offset.y + (int32_t)sr.extent.height, 1};
+                br.dstOffsets[0] = dr.offset;
+                br.dstOffsets[1] = (VkOffset3D){dr.offset.x + (int32_t)dr.extent.width,
+                                                 dr.offset.y + (int32_t)dr.extent.height, 1};
+                if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { int32_t x = br.srcOffsets[0].x; br.srcOffsets[0].x = br.srcOffsets[1].x; br.srcOffsets[1].x = x; }
+                if (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) { int32_t y = br.srcOffsets[0].y; br.srcOffsets[0].y = br.srcOffsets[1].y; br.srcOffsets[1].y = y; }
+                vkCmdBlitImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               d->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &br, filter);
+            }
+        } else {
+            VkImageBlit br = {0};
+            br.srcSubresource = sr.subresource; br.dstSubresource = dr.subresource;
+            br.srcOffsets[0] = sr.offset;
+            br.srcOffsets[1] = (VkOffset3D){sr.offset.x + (int32_t)sr.extent.width,
+                                             sr.offset.y + (int32_t)sr.extent.height,
+                                             sr.offset.z + (int32_t)sr.extent.depth};
+            br.dstOffsets[0] = dr.offset;
+            br.dstOffsets[1] = (VkOffset3D){dr.offset.x + (int32_t)dr.extent.width,
+                                             dr.offset.y + (int32_t)dr.extent.height,
+                                             dr.offset.z + (int32_t)dr.extent.depth};
+            if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { int32_t x = br.srcOffsets[0].x; br.srcOffsets[0].x = br.srcOffsets[1].x; br.srcOffsets[1].x = x; }
+            if (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) { int32_t y = br.srcOffsets[0].y; br.srcOffsets[0].y = br.srcOffsets[1].y; br.srcOffsets[1].y = y; }
+            if (c->flags & NVN_COPY_FLAGS_MIRROR_Z_BIT) { int32_t z = br.srcOffsets[0].z; br.srcOffsets[0].z = br.srcOffsets[1].z; br.srcOffsets[1].z = z; }
+            vkCmdBlitImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           d->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &br, filter);
+        }
     } else {
         VkImageCopy r = {0};
         r.srcSubresource = sr.subresource; r.srcOffset = sr.offset;
@@ -2341,29 +2561,105 @@ static void copy_t2t(const p_copy_t2t *c) {
     d->gpu_dirty = 1;
 }
 
-// nvnCommandBufferClearTexture: a full-level clear goes through Vulkan's
-// transfer clear. A partial clear needs a render pass or shader; it reports
-// rather than clearing the whole target.
+// nvnCommandBufferClearTexture: use transfer clear for complete subresources
+// and a small clear-only render pass for rectangular color regions. The latter
+// preserves pixels outside the region; vkCmdClearColorImage cannot express a
+// rectangle. Partial component masks and depth/stencil formats need a distinct
+// implementation, so they remain explicit errors instead of being widened.
 static void clear_tex_record(const p_clear_tex *c) {
     if (!c || !c->tex) return;
     tex_ent *e = tex_ensure(c->tex);
     if (!e) return;
-    uint32_t w = c->tex->d.width ? c->tex->d.width : 1, h = c->tex->d.height ? c->tex->d.height : 1;
-    if (c->r.xoffset || c->r.yoffset || c->r.zoffset || (uint32_t)c->r.width != w || (uint32_t)c->r.height != h) {
-        warn_once(&g_draw_warned, "NVN partial texture clear"); return;
+    size_t bpp = 0; VkFormat fmt = VK_FORMAT_UNDEFINED;
+    if (copy_format(c->tex, &fmt, &bpp) != 0 || e->samples != 1) {
+        LOG("[RED] [nvn/vk] texture clear format or sample count is unsupported"); return;
     }
+    const view_t *view = c->has_view ? &c->view : NULL;
+    nvn_copy_region region;
+    if (!nvn_copy_view_compatible(c->tex, view) ||
+        nvn_copy_region_make(c->tex, e, view, &c->r, bpp, &region) != 0) {
+        LOG("[RED] [nvn/vk] texture clear has an unsupported view or region"); return;
+    }
+    if ((c->mask & 0xf) != 0xf || (c->mask & ~0xf) != 0) {
+        warn_once(&g_draw_warned, "NVN partial texture clear component mask"); return;
+    }
+    int partial = region.offset.x || region.offset.y || region.offset.z ||
+        region.extent.width != (c->tex->d.width >> region.subresource.mipLevel) ||
+        region.extent.height != (c->tex->d.height >> region.subresource.mipLevel) ||
+        (c->tex->d.target == NVN_TEXTURE_TARGET_3D &&
+         (region.offset.z || region.extent.depth != (c->tex->d.depth >> region.subresource.mipLevel)));
     VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
     if (!cb) return;
-    copy_transition(cb, e, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, c->tex->d.levels ? c->tex->d.levels : 1, 0, 1};
-    if (c->is_uint) {
-        VkClearColorValue v; memcpy(v.uint32, c->c.u, sizeof v.uint32);
-        vkCmdClearColorImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+    if (!partial && region.offset.z == 0 && region.subresource.baseArrayLayer == 0 &&
+        region.subresource.layerCount == e->layers && region.subresource.mipLevel == 0 &&
+        (c->tex->d.target != NVN_TEXTURE_TARGET_3D || region.extent.depth == c->tex->d.depth)) {
+        copy_transition(cb, e, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, e->levels, 0, e->layers};
+        if (c->is_uint) {
+            VkClearColorValue v; memcpy(v.uint32, c->c.u, sizeof v.uint32);
+            vkCmdClearColorImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+        } else {
+            VkClearColorValue v; memcpy(v.float32, c->c.f, sizeof v.float32);
+            vkCmdClearColorImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+        }
+        copy_transition(cb, e, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     } else {
-        VkClearColorValue v; memcpy(v.float32, c->c.f, sizeof v.float32);
-        vkCmdClearColorImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+        const int is_3d = c->tex->d.target == NVN_TEXTURE_TARGET_3D;
+        if (is_3d && !g_vk.caps.image_2d_view_of_3d) {
+            nx_vk_oneshot_end(&g_vk, cb);
+            LOG("[RED] [nvn/vk] partial 3D clear requires Vulkan image2DViewOf3D support"); return;
+        }
+        VkRenderPass rp = rp_get(1, &fmt, VK_FORMAT_UNDEFINED, 1);
+        uint32_t mip_w = c->tex->d.width >> region.subresource.mipLevel;
+        uint32_t mip_h = c->tex->d.height >> region.subresource.mipLevel;
+        if (!mip_w) mip_w = 1;
+        if (!mip_h) mip_h = 1;
+        if (rp == VK_NULL_HANDLE) {
+            nx_vk_oneshot_end(&g_vk, cb);
+            LOG("[RED] [nvn/vk] could not create partial-clear render pass"); return;
+        }
+        copy_transition(cb, e, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        uint32_t slices = is_3d ? region.extent.depth : 1;
+        for (uint32_t slice = 0; slice < slices; slice++) {
+            uint32_t base_layer = is_3d ? region.offset.z + slice : region.subresource.baseArrayLayer;
+            uint32_t layers = is_3d ? 1 : region.subresource.layerCount;
+            VkImageViewCreateInfo vi = {0};
+            vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            vi.image = e->img;
+            vi.viewType = !is_3d && layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+            vi.format = fmt;
+            vi.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,
+                region.subresource.mipLevel, 1, base_layer, layers};
+            VkImageView iv = VK_NULL_HANDLE;
+            if (vkCreateImageView(g_vk.device, &vi, NULL, &iv) != VK_SUCCESS) {
+                nx_vk_oneshot_end(&g_vk, cb);
+                LOG("[RED] [nvn/vk] could not create partial-clear image view"); return;
+            }
+            VkFramebuffer fb = VK_NULL_HANDLE;
+            VkFramebufferCreateInfo fi = {0};
+            fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fi.renderPass = rp;
+            fi.attachmentCount = 1; fi.pAttachments = &iv; fi.width = mip_w; fi.height = mip_h;
+            fi.layers = layers;
+            if (vkCreateFramebuffer(g_vk.device, &fi, NULL, &fb) != VK_SUCCESS) {
+                vkDestroyImageView(g_vk.device, iv, NULL); nx_vk_oneshot_end(&g_vk, cb);
+                LOG("[RED] [nvn/vk] could not create partial-clear framebuffer"); return;
+            }
+            VkRenderPassBeginInfo bi = {0};
+            bi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; bi.renderPass = rp; bi.framebuffer = fb;
+            bi.renderArea = (VkRect2D){{0, 0}, {mip_w, mip_h}};
+            vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+            VkClearAttachment ca = {0}; ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            if (c->is_uint) memcpy(ca.clearValue.color.uint32, c->c.u, sizeof c->c.u);
+            else memcpy(ca.clearValue.color.float32, c->c.f, sizeof c->c.f);
+            VkClearRect cr = {{{region.offset.x, region.offset.y}, {region.extent.width, region.extent.height}}, 0, layers};
+            vkCmdClearAttachments(cb, 1, &ca, 1, &cr);
+            vkCmdEndRenderPass(cb);
+            vkDestroyFramebuffer(g_vk.device, fb, NULL);
+            vkDestroyImageView(g_vk.device, iv, NULL);
+        }
+        e->layout = VK_IMAGE_LAYOUT_GENERAL;
+        nx_vk_oneshot_end(&g_vk, cb);
     }
-    copy_transition(cb, e, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-    nx_vk_oneshot_end(&g_vk, cb);
     e->gpu_dirty = 1;
 }

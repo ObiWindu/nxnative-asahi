@@ -1,5 +1,5 @@
-// NVN -> Vulkan advanced-blend test: the Porter-Duff modes that fixed-function
-// factors can express (blend_st.adv) must override the state's blend functions.
+// NVN -> Vulkan advanced-blend test: Porter-Duff and complex blend equations
+// must override the state's ordinary blend functions.
 // A full-screen triangle writes the case's source colour over the case's clear
 // colour; the expected centre is the fixed-function result. A driver rounds a
 // blend result to its own precision, so each channel allows one step.
@@ -120,6 +120,10 @@ int main(void) {
         {NVN_BLEND_ADVANCED_MODE_SRC_OVER, "SRC_OVER not premultiplied", 1, {1,0,0,0.5f}, {0,0,1,1}, 128, 0, 128, 255},
         {NVN_BLEND_ADVANCED_MODE_PLUS, "PLUS", 0, {1,0,0,1}, {0,0,1,1}, 255, 0, 255, 255},
         {NVN_BLEND_ADVANCED_MODE_SRC_IN, "SRC_IN", 0, {1,0,0,1}, {0,0,1,0.5f}, 128, 0, 0, 128},
+        {NVN_BLEND_ADVANCED_MODE_MULTIPLY, "MULTIPLY", 0, {1,0,0,1}, {0,0,1,1}, 0, 0, 0, 255},
+        {NVN_BLEND_ADVANCED_MODE_SCREEN, "SCREEN", 0, {1,0,0,1}, {0,0,1,1}, 255, 0, 255, 255},
+        {NVN_BLEND_ADVANCED_MODE_OVERLAY, "OVERLAY", 0, {1,0,0,1}, {0,0,1,1}, 0, 0, 255, 255},
+        {NVN_BLEND_ADVANCED_MODE_DIFFERENCE, "DIFFERENCE", 0, {1,0,0,1}, {0,0,1,1}, 255, 0, 255, 255},
     };
     const int ncase = (int)(sizeof cases / sizeof *cases);
     for (int c = 0; c < ncase; c++) {

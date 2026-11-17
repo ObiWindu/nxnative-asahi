@@ -143,6 +143,105 @@ int main(void) {
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
     CHECK(mid[0] >= 55 && mid[0] <= 72 && mid[1] < 20 && mid[2] < 20,
           "near=-w rewrite put the centre at z=0.25: %u %u %u", mid[0], mid[1], mid[2]);
+
+    NVNcommandBuffer cb_zero_color_mask;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_zero_color_mask, &dev) == 1, "zero color-mask command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_zero_color_mask, &pool, 0x28000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_zero_color_mask);
+    const NVNtexture *only_color[1] = {&tex};
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_zero_color_mask, 1, only_color, NULL, NULL, NULL);
+    float green[4] = {0, 1, 0, 1};
+    NVNF(nvnCommandBufferClearColor)(&cb_zero_color_mask, 0, green, 0);
+    NVNcommandHandle hzm = NVNF(nvnCommandBufferEndRecording)(&cb_zero_color_mask);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hzm);
+    NVNF(nvnQueueFinish)(&q);
+    mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    mid = px + (32 * 64 + 32) * 4;
+    CHECK(mid[0] >= 55 && mid[0] <= 72 && mid[1] < 20 && mid[2] < 20,
+          "zero color write mask leaves the attachment unchanged");
+
+    NVNcommandBuffer cb_scissor_color_clear;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_scissor_color_clear, &dev) == 1, "scissored color-clear command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_scissor_color_clear, &pool, 0x29000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_scissor_color_clear);
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_scissor_color_clear, 1, only_color, NULL, NULL, NULL);
+    NVNF(nvnCommandBufferSetScissor)(&cb_scissor_color_clear, 24, 24, 16, 16);
+    NVNF(nvnCommandBufferClearColor)(&cb_scissor_color_clear, 0, green, 0xf);
+    NVNcommandHandle hscc = NVNF(nvnCommandBufferEndRecording)(&cb_scissor_color_clear);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hscc);
+    NVNF(nvnQueueFinish)(&q);
+    mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    mid = px + (32 * 64 + 32) * 4;
+    corner = px;
+    CHECK(mid[1] > 250 && mid[0] < 5 && corner[2] > 200,
+          "scissored color clear changes its rectangle and preserves outside pixels");
+
+    // A depth clear with depthMask=0 must leave the existing depth value
+    // intact. If replay clears unconditionally, the z=0.25 draw below passes
+    // against the incorrectly replaced value 1.0 and paints the blue target red.
+    NVNtexture depth_tex;
+    NVNtextureBuilder depth_tb;
+    NVNF(nvnTextureBuilderSetDefaults)(&depth_tb); NVNF(nvnTextureBuilderSetDevice)(&depth_tb, &dev);
+    NVNF(nvnTextureBuilderSetTarget)(&depth_tb, NVN_TEXTURE_TARGET_2D);
+    NVNF(nvnTextureBuilderSetSize2D)(&depth_tb, 64, 64);
+    NVNF(nvnTextureBuilderSetFormat)(&depth_tb, NVN_FORMAT_DEPTH32F);
+    NVNF(nvnTextureBuilderSetFlags)(&depth_tb, NVN_TEXTURE_FLAGS_LINEAR);
+    NVNF(nvnTextureBuilderSetStorage)(&depth_tb, &pool, 0x20000);
+    CHECK(NVNF(nvnTextureInitialize)(&depth_tex, &depth_tb) == 1, "depth-mask test attachment initializes");
+    NVNdepthStencilState ds;
+    NVNF(nvnDepthStencilStateSetDefaults)(&ds);
+    NVNF(nvnDepthStencilStateSetDepthTestEnable)(&ds, 1);
+    NVNF(nvnDepthStencilStateSetDepthWriteEnable)(&ds, 0);
+    NVNF(nvnDepthStencilStateSetDepthFunc)(&ds, NVN_DEPTH_FUNC_LESS);
+    NVNcommandBuffer cb_depth_mask;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_depth_mask, &dev) == 1, "depth-mask command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_depth_mask, &pool, 0x30000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_depth_mask);
+    const NVNtexture *depth_color[1] = {&tex};
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_depth_mask, 1, depth_color, NULL, &depth_tex, NULL);
+    NVNF(nvnCommandBufferClearColor)(&cb_depth_mask, 0, blue, 0xf);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_depth_mask, 0.1f, 1, 0, 0);
+    NVNF(nvnCommandBufferBindDepthStencilState)(&cb_depth_mask, &ds);
+    NVNF(nvnCommandBufferSetScissor)(&cb_depth_mask, 24, 24, 16, 16);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_depth_mask, 0.8f, 1, 0, 0);
+    NVNF(nvnCommandBufferSetScissor)(&cb_depth_mask, 0, 0, 64, 64);
+    NVNF(nvnCommandBufferBindProgram)(&cb_depth_mask, &prog, 3);
+    NVNF(nvnCommandBufferBindVertexAttribState)(&cb_depth_mask, 1, &va);
+    NVNF(nvnCommandBufferBindVertexStreamState)(&cb_depth_mask, 1, &vs);
+    NVNF(nvnCommandBufferBindVertexBuffer)(&cb_depth_mask, 0, (NVNbufferAddress)(uintptr_t)(storage + 0x8000), 24);
+    NVNF(nvnCommandBufferDrawArrays)(&cb_depth_mask, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
+    NVNcommandHandle hdm = NVNF(nvnCommandBufferEndRecording)(&cb_depth_mask);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hdm);
+    NVNF(nvnQueueFinish)(&q);
+    mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    mid = px + (32 * 64 + 32) * 4;
+    corner = px;
+    CHECK(mid[0] >= 55 && mid[0] <= 72 && mid[2] < 20 && corner[2] > 200,
+          "scissored depth clear changes only depth inside its rectangle: centre %u %u %u corner %u %u %u",
+          mid[0], mid[1], mid[2], corner[0], corner[1], corner[2]);
+
+    NVNcommandBuffer cb_depth_mask_off;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_depth_mask_off, &dev) == 1, "depth-mask-off command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_depth_mask_off, &pool, 0x40000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_depth_mask_off);
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_depth_mask_off, 1, depth_color, NULL, &depth_tex, NULL);
+    NVNF(nvnCommandBufferClearColor)(&cb_depth_mask_off, 0, blue, 0xf);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_depth_mask_off, 0.1f, 1, 0, 0);
+    NVNF(nvnCommandBufferBindDepthStencilState)(&cb_depth_mask_off, &ds);
+    NVNF(nvnCommandBufferSetScissor)(&cb_depth_mask_off, 0, 0, 64, 64);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_depth_mask_off, 1.0f, 0, 0, 0);
+    NVNF(nvnCommandBufferBindProgram)(&cb_depth_mask_off, &prog, 3);
+    NVNF(nvnCommandBufferBindVertexAttribState)(&cb_depth_mask_off, 1, &va);
+    NVNF(nvnCommandBufferBindVertexStreamState)(&cb_depth_mask_off, 1, &vs);
+    NVNF(nvnCommandBufferBindVertexBuffer)(&cb_depth_mask_off, 0, (NVNbufferAddress)(uintptr_t)(storage + 0x8000), 24);
+    NVNF(nvnCommandBufferDrawArrays)(&cb_depth_mask_off, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
+    NVNcommandHandle hdm_off = NVNF(nvnCommandBufferEndRecording)(&cb_depth_mask_off);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hdm_off);
+    NVNF(nvnQueueFinish)(&q);
+    mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    mid = px + (32 * 64 + 32) * 4;
+    CHECK(mid[2] > 200 && mid[0] < 40,
+          "depthMask=0 preserves the prior depth attachment value: %u %u %u", mid[0], mid[1], mid[2]);
     extern uint64_t mtl_present(const void *, double, const int *, uint64_t *);
     uint64_t copy = 0;
     uint64_t ticket = mtl_present(&tex, 1.0 / 60.0, NULL, &copy);

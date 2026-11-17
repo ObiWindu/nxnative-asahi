@@ -110,6 +110,25 @@ class IoStore(unittest.TestCase):
         self.root = Path(tmp.name); self.romfs = self.root / 'RomFS'; self.romfs.mkdir()
         self.work = self.root / 'work'
 
+    def test_oodle_host_accepts_linux_command_sequence(self):
+        import textwrap
+        server = textwrap.dedent('''
+            import struct, sys
+            r, w = sys.stdin.buffer, sys.stdout.buffer
+            while True:
+                h = r.read(16)
+                if not h: break
+                if len(h) != 16: raise SystemExit(2)
+                size, raw = struct.unpack('<QQ', h)
+                data = r.read(size)
+                if len(data) != size: raise SystemExit(3)
+                w.write(struct.pack('<Q', len(data))); w.write(data); w.flush()
+        ''')
+        dec = uepak.OodleHost([sys.executable, '-c', server])
+        self.addCleanup(dec.close)
+        payload = b'linux decoder pipe'
+        self.assertEqual(dec(payload, len(payload)), payload)
+
     def run_job(self, decode=None):
         # The NSO and pak paths are outside this test's scope; TOC parsing, resolution and archive writing are real.
         with patch.object(uepak, 'nso_image', return_value=(b'', 0, 0)), patch.object(uepak, 'unreal_paks', return_value=[]):

@@ -96,19 +96,27 @@ static void test_faults(void) {
 
 static void test_alias(void) {
     size_t hp = nx_host_page_size();
-    NxMemAlias *a = nx_mem_alias_create(hp);
+    NxMemAlias *a = nx_mem_alias_create(hp * 2);
     CHECK(a != NULL, "memfd alias created");
     if (!a) return;
     uint8_t *p1 = nx_mem_alias_map(a, 0, hp, PROT_READ | PROT_WRITE);
     uint8_t *p2 = nx_mem_alias_map(a, 0, hp, PROT_READ | PROT_WRITE);
+    uint8_t *p3 = nx_mem_alias_map_at(a, 0, hp, hp, PROT_READ | PROT_WRITE);
     CHECK(p1 && p2 && p1 != p2, "same memfd mapped at two guest addresses (%p, %p)", (void *)p1, (void *)p2);
-    if (p1 && p2) {
+    CHECK(p3 != NULL, "map a different backing offset (%p)", (void *)p3);
+    CHECK(nx_mem_alias_map_at(a, 0, hp, hp * 2, PROT_READ | PROT_WRITE) == NULL, "reject backing offset past the memfd");
+    CHECK(nx_mem_alias_map_at(a, 0, hp * 3, 0, PROT_READ | PROT_WRITE) == NULL, "reject mapping larger than the memfd");
+    if (p1 && p2 && p3) {
         memset(p1, 0x3c, hp);
         CHECK(p2[0] == 0x3c && p2[hp - 1] == 0x3c, "write through one alias is visible through the other");
         p2[0] = 0xa5;
         CHECK(p1[0] == 0xa5, "write through the second alias is visible through the first");
+        CHECK(p3[0] == 0, "unrelated backing offset does not alias the first page");
+        p3[0] = 0x71;
+        CHECK(p1[0] == 0xa5, "write to another backing offset leaves the first page unchanged");
         nx_mem_alias_unmap(p1, hp);
         nx_mem_alias_unmap(p2, hp);
+        nx_mem_alias_unmap(p3, hp);
     }
     nx_mem_alias_destroy(a);
 }

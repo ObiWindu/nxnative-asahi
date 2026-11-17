@@ -160,13 +160,33 @@ int nx_vk_init(NxVk *vk, const NxVkConfig *cfg) {
     p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     VkPhysicalDeviceDriverProperties dp = {0};
     dp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT adv_props = {0};
+    adv_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT;
+    if (has_device_ext(vk->physical, VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME)) dp.pNext = &adv_props;
     p2.pNext = &dp;
     vkGetPhysicalDeviceProperties2(vk->physical, &p2);
     vk->caps.props = p2.properties;
+    if (has_device_ext(vk->physical, VK_EXT_IMAGE_2D_VIEW_OF_3D_EXTENSION_NAME)) {
+        VkPhysicalDeviceImage2DViewOf3DFeaturesEXT image2d = {0};
+        image2d.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_2D_VIEW_OF_3D_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 features = {0};
+        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features.pNext = &image2d;
+        vkGetPhysicalDeviceFeatures2(vk->physical, &features);
+        vk->caps.image_2d_view_of_3d = image2d.image2DViewOf3D;
+    }
+    if (dp.pNext) {
+        vk->caps.advanced_blend_properties = adv_props;
+        vk->caps.advanced_blend_properties.pNext = NULL;
+    }
     if (vk->caps.props.apiVersion >= VK_API_VERSION_1_2 ||
-        has_device_ext(vk->physical, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
+        has_device_ext(vk->physical, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) ||
+        has_device_ext(vk->physical, VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME)) {
         VkPhysicalDeviceDescriptorIndexingFeatures indexing = {0};
         indexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+        VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT adv_features = {0};
+        adv_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT;
+        if (has_device_ext(vk->physical, VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME)) indexing.pNext = &adv_features;
         VkPhysicalDeviceFeatures2 features = {0};
         features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         features.pNext = &indexing;
@@ -174,6 +194,10 @@ int nx_vk_init(NxVk *vk, const NxVkConfig *cfg) {
         vk->caps.features = features.features;
         vk->caps.descriptor_indexing = indexing;
         vk->caps.descriptor_indexing.pNext = NULL;
+        if (indexing.pNext) {
+            vk->caps.advanced_blend_features = adv_features;
+            vk->caps.advanced_blend_features.pNext = NULL;
+        }
     } else {
         vkGetPhysicalDeviceFeatures(vk->physical, &vk->caps.features);
     }
@@ -232,8 +256,10 @@ int nx_vk_init(NxVk *vk, const NxVkConfig *cfg) {
         VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
         VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,
         VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
+        VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME,
+        VK_EXT_IMAGE_2D_VIEW_OF_3D_EXTENSION_NAME,
     };
-    for (size_t i = 0; i < sizeof wanted / sizeof *wanted && next_ext < 15; i++) {
+    for (size_t i = 0; i < sizeof wanted / sizeof *wanted && next_ext < sizeof dexts / sizeof *dexts; i++) {
         if (i == 0 && !cfg->enable_swapchain && !vk->surface) continue;
         if (has_device_ext(vk->physical, wanted[i])) dexts[next_ext++] = wanted[i];
     }
@@ -265,6 +291,19 @@ int nx_vk_init(NxVk *vk, const NxVkConfig *cfg) {
     dci.pEnabledFeatures = &enabled;
     dci.enabledExtensionCount = next_ext;
     dci.ppEnabledExtensionNames = dexts;
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT adv_enable = {0};
+    VkPhysicalDeviceImage2DViewOf3DFeaturesEXT image2d_enable = {0};
+    if (vk->caps.image_2d_view_of_3d) {
+        image2d_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_2D_VIEW_OF_3D_FEATURES_EXT;
+        image2d_enable.image2DViewOf3D = VK_TRUE;
+        dci.pNext = &image2d_enable;
+    }
+    if (has_device_ext(vk->physical, VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME)) {
+        adv_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT;
+        adv_enable.advancedBlendCoherentOperations = vk->caps.advanced_blend_features.advancedBlendCoherentOperations;
+        if (dci.pNext) image2d_enable.pNext = &adv_enable;
+        else dci.pNext = &adv_enable;
+    }
     r = vkCreateDevice(vk->physical, &dci, NULL, &vk->device);
     if (r != VK_SUCCESS) {
         NX_LOGE("vkCreateDevice failed: %d", (int)r);
@@ -383,6 +422,18 @@ void nx_vk_report(const NxVk *vk, FILE *out) {
             vk->caps.descriptor_indexing.descriptorBindingPartiallyBound,
             vk->caps.descriptor_indexing.descriptorBindingVariableDescriptorCount,
             vk->caps.descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind);
+    fprintf(out, "Advanced blending: extension %d, coherent %d, maxColorAttachments %u, independent %d, nonPremultipliedSrc %d, nonPremultipliedDst %d, correlatedOverlap %d, allOperations %d\n",
+            nx_vk_supports_extension(vk, VK_EXT_BLEND_OPERATION_ADVANCED_EXTENSION_NAME),
+            vk->caps.advanced_blend_features.advancedBlendCoherentOperations,
+            vk->caps.advanced_blend_properties.advancedBlendMaxColorAttachments,
+            vk->caps.advanced_blend_properties.advancedBlendIndependentBlend,
+            vk->caps.advanced_blend_properties.advancedBlendNonPremultipliedSrcColor,
+            vk->caps.advanced_blend_properties.advancedBlendNonPremultipliedDstColor,
+            vk->caps.advanced_blend_properties.advancedBlendCorrelatedOverlap,
+            vk->caps.advanced_blend_properties.advancedBlendAllOperations);
+    fprintf(out, "3D slice views: extension %d, image2DViewOf3D %d\n",
+            nx_vk_supports_extension(vk, VK_EXT_IMAGE_2D_VIEW_OF_3D_EXTENSION_NAME),
+            vk->caps.image_2d_view_of_3d);
     static const VkFormat fmts[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB,
                                     VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D16_UNORM,
                                     VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK,
@@ -443,11 +494,12 @@ void nx_vk_destroy_buffer(NxVk *vk, VkBuffer buf, VkDeviceMemory mem) {
 }
 
 int nx_vk_create_image(NxVk *vk, VkImageType type, VkFormat fmt, VkExtent3D extent, uint32_t mips, uint32_t layers,
-                       uint32_t samples, VkImageTiling tiling, VkImageUsageFlags usage, VkImageLayout initial,
+                       uint32_t samples, VkImageTiling tiling, VkImageCreateFlags flags, VkImageUsageFlags usage, VkImageLayout initial,
                        VkImage *img, VkDeviceMemory *mem) {
     *img = VK_NULL_HANDLE; *mem = VK_NULL_HANDLE;
     VkImageCreateInfo ci = {0};
     ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.flags = flags;
     ci.imageType = type;
     ci.format = fmt;
     ci.extent = extent;

@@ -24,6 +24,9 @@ typedef struct {
     VkPhysicalDeviceMemoryProperties memory;
     VkPhysicalDeviceFeatures features;
     VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing;
+    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT advanced_blend_features;
+    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT advanced_blend_properties;
+    VkBool32 image_2d_view_of_3d;
     uint32_t queue_family;
     uint32_t queue_count;
     VkQueueFlags queue_flags;
@@ -81,7 +84,7 @@ int nx_vk_create_buffer(NxVk *vk, VkDeviceSize size, VkBufferUsageFlags usage, V
                         VkBuffer *buf, VkDeviceMemory *mem, void **mapped);
 void nx_vk_destroy_buffer(NxVk *vk, VkBuffer buf, VkDeviceMemory mem);
 int nx_vk_create_image(NxVk *vk, VkImageType type, VkFormat fmt, VkExtent3D extent, uint32_t mips, uint32_t layers,
-                       uint32_t samples, VkImageTiling tiling, VkImageUsageFlags usage, VkImageLayout initial,
+                       uint32_t samples, VkImageTiling tiling, VkImageCreateFlags flags, VkImageUsageFlags usage, VkImageLayout initial,
                        VkImage *img, VkDeviceMemory *mem);
 void nx_vk_destroy_image(NxVk *vk, VkImage img, VkDeviceMemory mem);
 

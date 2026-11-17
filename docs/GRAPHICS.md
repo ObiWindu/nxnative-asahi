@@ -85,8 +85,11 @@ Vulkan work:
 - the NVN alpha test, injected into the fragment SPIR-V as a discard before each
   return, with the reference and comparison mask as specialization constants
   (the pipeline cache key includes both), Vulkan logic-op state, which takes
-  the place of blending, and the fixed-function Porter-Duff advanced blend
-  modes (multiply/screen/overlay/HSL fall back with a red line);
+  the place of blending, and NVN advanced blend modes through
+  VK_EXT_blend_operation_advanced when its queried operation, overlap,
+  premultiplication and attachment limits cover the requested state; devices
+  without a valid path retain the Porter-Duff fallback and diagnose other
+  modes;
 - descriptor binding for uniforms, storage buffers, textures, samplers and
   storage images, using the semantic NVN slots; fixed direct storage-image
   arrays resolve element `k` from NVN slot `reg + k` and are tracked across

@@ -2580,15 +2580,22 @@ def smash_arc_shaders(path, rel, ents, out):
 _OODLE = None
 def oodle_ask(comp, n):
     """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, Pokémon Legends: Arceus's GFPAK entries Oodle Kraken, and Oodle is linked into main), or LZ5_decompress_safe (DRAGON QUEST XI S's legacy Unreal paks):
-    one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host, DM_OODLE_MODULES = the rewritten modules it loads
-    (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources). → (the decoded bytes or None, the host is gone)"""
+    one game-host process per worker in tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_COMMAND is a JSON argv array for Linux; DM_OODLE_HOST and
+    DM_OODLE_MODULES retain the Mac/legacy command form (the NSP script selects from detected shader sources, profile_guess.py shader_sources). → (the decoded bytes or None, the host is gone)"""
     global _OODLE
     if _OODLE is None:
         import tempfile
-        host, mods = os.environ.get('DM_OODLE_HOST'), os.environ.get('DM_OODLE_MODULES')
-        if not host or not mods: red('Oodle- or LZ5-compressed game files: set DM_OODLE_HOST (the Mac host, make -C dm/host GAME=<id> dmhost) and DM_OODLE_MODULES (the rewritten modules) to decode them with the game\'s own decoder')
+        command = os.environ.get('DM_OODLE_COMMAND')
+        if command:
+            try: cmd = json.loads(command)
+            except json.JSONDecodeError as e: red(f'DM_OODLE_COMMAND is not a JSON command array: {e}')
+            if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd): red('DM_OODLE_COMMAND must be a non-empty JSON array of strings')
+        else:
+            host, mods = os.environ.get('DM_OODLE_HOST'), os.environ.get('DM_OODLE_MODULES')
+            if not host or not mods: red('Oodle- or LZ5-compressed game files: set DM_OODLE_COMMAND to a JSON command array, or DM_OODLE_HOST and DM_OODLE_MODULES, to decode them with the game\'s own decoder')
+            cmd = [host, mods]
         err = tempfile.TemporaryFile()
-        _OODLE = (subprocess.Popen([host, mods], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=dict(os.environ, DM_OODLE_SERVE='1')), err)
+        _OODLE = (subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=dict(os.environ, DM_OODLE_SERVE='1')), err)
     p, err = _OODLE
     try:
         p.stdin.write(struct.pack('<QQ', len(comp), n)); p.stdin.write(comp); p.stdin.flush()
