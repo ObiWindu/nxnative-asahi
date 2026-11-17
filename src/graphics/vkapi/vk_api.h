@@ -20,6 +20,7 @@ typedef struct NxWindow NxWindow;
 void nx_vkapi_set_window(NxWindow *w);
 NxWindow *nx_vkapi_window(void);
 void nx_vkapi_set_present_hook(void (*fn)(void));
+void nx_vkapi_set_game_identity(const char *title_id, const char *main_build_id);
 void *nx_vkapi_lookup(const char *name);
 
 // Load the real Vulkan loader and fill the global entry slots. Called lazily by

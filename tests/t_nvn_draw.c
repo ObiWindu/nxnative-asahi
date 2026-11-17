@@ -51,8 +51,9 @@ int main(void) {
         "void main(){ gl_Position=vec4(pos,0,1); }\n";
     const char *fs_src =
         "#version 450\n"
+        "layout(set=0,binding=1,rgba8) uniform image2D storageOut;\n"
         "layout(location=0) out vec4 outColor;\n"
-        "void main(){ outColor=vec4(1,0,0,1); }\n";
+        "void main(){ outColor=vec4(1,0,0,1); imageStore(storageOut,ivec2(0),vec4(0,1,0,1)); }\n";
     uint8_t *vsp = NULL, *fsp = NULL; size_t vsn = 0, fsn = 0;
     if (compile_shader(lib, vs_src, 0, "t.vert", &vsp, &vsn) || compile_shader(lib, fs_src, 1, "t.frag", &fsp, &fsn)) {
         printf("FAIL: shaderc compile\n"); return 1;
@@ -69,7 +70,7 @@ int main(void) {
     snprintf(path, sizeof path, "%s/%s_b.spv", dir, fkey);
     if (put(path, fsp, fsn)) { printf("FAIL: write fs\n"); return 1; }
     snprintf(path, sizeof path, "%s/%s_b.json", dir, fkey);
-    const char *fsjson = "{\"stage\":\"ps\",\"entry\":\"main\",\"bindings\":[],\"vertex_inputs\":[],\"raster\":{\"colors\":[0]}}\n";
+    const char *fsjson = "{\"stage\":\"ps\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"img\",\"reg\":0}],\"vertex_inputs\":[],\"raster\":{\"colors\":[0]}}\n";
     if (put(path, fsjson, strlen(fsjson))) { printf("FAIL: write fs json\n"); return 1; }
 
     int g_fail = 0;
@@ -96,6 +97,13 @@ int main(void) {
     NVNF(nvnTextureBuilderSetFlags)(&tb, NVN_TEXTURE_FLAGS_LINEAR);
     NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0);
     CHECK(NVNF(nvnTextureInitialize)(&tex, &tb) == 1, "render target texture initializes");
+    NVNtexture image;
+    NVNF(nvnTextureBuilderSetSize2D)(&tb, 1, 1);
+    NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0x4000);
+    CHECK(NVNF(nvnTextureInitialize)(&image, &tb) == 1, "fragment storage image initializes");
+    NVNtexturePool tpool;
+    CHECK(NVNF(nvnTexturePoolInitialize)(&tpool, &pool, 0x20000, 8) == 1, "texture pool initializes");
+    NVNF(nvnTexturePoolRegisterImage)(&tpool, 1, &image, NULL);
 
     static uint8_t ctl_vs[0x880], ctl_ps[0x880];
     ctl_ps[0] = 1;
@@ -108,16 +116,34 @@ int main(void) {
     verts[0] = -0.5f; verts[1] = -0.5f;
     verts[2] =  0.5f; verts[3] = -0.5f;
     verts[4] =  0.0f; verts[5] =  0.5f;
+    verts[6] = -0.9f; verts[7] = -0.4f;
+    verts[8] = -0.6f; verts[9] = -0.4f;
+    verts[10] = -0.6f; verts[11] = 0.4f;
+    verts[12] = -0.9f; verts[13] = 0.4f;
+    verts[14] = 0.6f; verts[15] = -0.4f;
+    verts[16] = 0.9f; verts[17] = -0.4f;
+    verts[18] = 0.9f; verts[19] = 0.4f;
+    verts[20] = 0.6f; verts[21] = 0.4f;
+    verts[22] = -0.4f; verts[23] = -0.9f;
+    verts[24] = 0.4f; verts[25] = -0.9f;
+    verts[26] = -0.4f; verts[27] = -0.6f;
+    verts[28] = 0.4f; verts[29] = -0.6f;
+    verts[30] = -0.3f; verts[31] = 0.6f;
+    verts[32] = 0.3f; verts[33] = 0.6f;
+    verts[34] = 0.3f; verts[35] = 0.9f;
+    verts[36] = -0.3f; verts[37] = 0.9f;
 
     NVNcommandBuffer cb;
     CHECK(NVNF(nvnCommandBufferInitialize)(&cb, &dev) == 1, "command buffer initializes");
     NVNF(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0x10000, 0x10000);
+    NVNF(nvnCommandBufferSetTexturePool)(&cb, &tpool);
     NVNF(nvnCommandBufferBeginRecording)(&cb);
     const NVNtexture *color[1] = {&tex};
     NVNF(nvnCommandBufferSetRenderTargets)(&cb, 1, color, NULL, NULL, NULL);
     float blue[4] = {0, 0, 1, 1};
     NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
     NVNF(nvnCommandBufferBindProgram)(&cb, &prog, 3);
+    NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, (NVNimageHandle)1);
     NVNvertexAttribState va;
     NVNF(nvnVertexAttribStateSetDefaults)(&va);
     NVNF(nvnVertexAttribStateSetFormat)(&va, NVN_FORMAT_RG32F, 0);
@@ -128,8 +154,33 @@ int main(void) {
     NVNF(nvnVertexStreamStateSetStride)(&vs, 8);
     NVNF(nvnVertexStreamStateSetDivisor)(&vs, 0);
     NVNF(nvnCommandBufferBindVertexStreamState)(&cb, 1, &vs);
-    NVNF(nvnCommandBufferBindVertexBuffer)(&cb, 0, (NVNbufferAddress)(uintptr_t)(storage + 0x8000), 24);
+    NVNF(nvnCommandBufferBindVertexBuffer)(&cb, 0, (NVNbufferAddress)(uintptr_t)(storage + 0x8000), 152);
     NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3);
+    NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_QUADS, 3, 4);
+    NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_POLYGON, 7, 4);
+    NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_QUAD_STRIP, 11, 4);
+    NVNF(nvnCommandBufferDrawArrays)(&cb, NVN_DRAW_PRIMITIVE_LINE_LOOP, 15, 4);
+    // Ordinary indirect and indirect-count calls share the same guest pool as
+    // their vertex data. The second record must be suppressed by count=1.
+    uint32_t *indirect_args = (uint32_t *)(storage + 0xa000);
+    indirect_args[0] = 4; indirect_args[1] = 1; indirect_args[2] = 7; indirect_args[3] = 0;
+    uint32_t *zero_instance_args = (uint32_t *)(storage + 0xa400);
+    zero_instance_args[0] = 4; zero_instance_args[1] = 0; zero_instance_args[2] = 15; zero_instance_args[3] = 0;
+    uint32_t *ind = (uint32_t *)(storage + 0xa100);
+    ind[0] = 3; ind[1] = 1; ind[2] = 0; ind[3] = 0;
+    ind[4] = 4; ind[5] = 1; ind[6] = 11; ind[7] = 0;
+    uint32_t *ind_count = (uint32_t *)(storage + 0xa200);
+    *ind_count = 1;
+    NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
+    NVNF(nvnCommandBufferDrawArraysIndirect)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, (NVNbufferAddress)(uintptr_t)indirect_args);
+    NVNF(nvnCommandBufferDrawArraysIndirect)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, (NVNbufferAddress)(uintptr_t)zero_instance_args);
+    NVNF(nvnCommandBufferMultiDrawArraysIndirectCount)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES,
+        (NVNbufferAddress)(uintptr_t)ind, (NVNbufferAddress)(uintptr_t)ind_count, 2, 16);
+    // A max above MDI_INLINE is encoded as one OP_MULTI_DRAW record.
+    uint32_t *large_args = (uint32_t *)(storage + 0xa300);
+    large_args[0] = 4; large_args[1] = 1; large_args[2] = 3; large_args[3] = 0;
+    NVNF(nvnCommandBufferMultiDrawArraysIndirectCount)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES,
+        (NVNbufferAddress)(uintptr_t)large_args, (NVNbufferAddress)(uintptr_t)ind_count, 1025, 16);
     NVNcommandHandle h = NVNF(nvnCommandBufferEndRecording)(&cb);
     NVNF(nvnQueueSubmitCommands)(&q, 1, &h);
     NVNF(nvnQueueFinish)(&q);
@@ -137,10 +188,28 @@ int main(void) {
     uint8_t px[64 * 64 * 4];
     NVNcopyRegion all = {0, 0, 0, 64, 64, 1};
     mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    uint8_t image_px[4];
+    NVNcopyRegion one = {0, 0, 0, 1, 1, 1};
+    mtl_read_texels(&image, 0, 0, &one, image_px, 4, 4);
+    CHECK(image_px[1] > 200 && image_px[0] < 40 && image_px[2] < 40,
+          "fragment storage image write survives draw completion: %u %u %u %u", image_px[0], image_px[1], image_px[2], image_px[3]);
     const uint8_t *corner = px;
-    const uint8_t *mid = px + (32 * 64 + 32) * 4;
+    const uint8_t *indirect_tri = px + (32 * 64 + 32) * 4;
+    const uint8_t *indirect_direct = px + (32 * 64 + 56) * 4;
+    const uint8_t *suppressed = px + (8 * 64 + 32) * 4;
+    const uint8_t *zero_instance = px + (51 * 64 + 32) * 4;
+    const uint8_t *large_batch = px + (32 * 64 + 8) * 4;
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
-    CHECK(mid[0] > 200 && mid[1] < 40 && mid[2] < 40, "the draw reached the target centre: %u %u %u", mid[0], mid[1], mid[2]);
+    CHECK(indirect_direct[0] > 200 && indirect_direct[1] < 40 && indirect_direct[2] < 40,
+          "ordinary indirect draw reached its target: %u %u %u", indirect_direct[0], indirect_direct[1], indirect_direct[2]);
+    CHECK(indirect_tri[0] > 200 && indirect_tri[1] < 40 && indirect_tri[2] < 40,
+          "small indirect-count batch drew its one live triangle: %u %u %u", indirect_tri[0], indirect_tri[1], indirect_tri[2]);
+    CHECK(suppressed[2] > 200 && suppressed[0] < 40,
+          "indirect-count batch suppressed the record beyond count=1: %u %u %u", suppressed[0], suppressed[1], suppressed[2]);
+    CHECK(zero_instance[2] > 200 && zero_instance[0] < 40,
+          "indirect instanceCount=0 produced no fragments: %u %u %u", zero_instance[0], zero_instance[1], zero_instance[2]);
+    CHECK(large_batch[0] > 200 && large_batch[1] < 40 && large_batch[2] < 40,
+          "large indirect-count batch drew its live quad: %u %u %u", large_batch[0], large_batch[1], large_batch[2]);
     extern uint64_t mtl_present(const void *, double, const int *, uint64_t *);
     uint64_t copy = 0;
     uint64_t ticket = mtl_present(&tex, 1.0 / 60.0, NULL, &copy);

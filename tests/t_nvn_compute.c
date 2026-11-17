@@ -26,7 +26,8 @@ int main(void) {
         "#version 450\n"
         "layout(local_size_x=8,local_size_y=1,local_size_z=1) in;\n"
         "layout(set=0,binding=1) buffer B { uint v[]; } b;\n"
-        "void main(){ uint i=gl_GlobalInvocationID.x; if(i<64u) b.v[i]=i*3u+1u; }\n";
+        "layout(set=0,binding=2) buffer A { uint groups[]; } a;\n"
+        "void main(){ uint i=gl_GlobalInvocationID.x; if(i<64u) b.v[i]=i*3u+1u; if(i==0u){ a.groups[0]=8u; a.groups[1]=1u; a.groups[2]=1u; } }\n";
     void *(*ci)(void) = (void *)dlsym(lib, "shaderc_compiler_initialize");
     void *(*oi)(void) = (void *)dlsym(lib, "shaderc_compile_options_initialize");
     void *(*co)(void *, const char *, size_t, int, const char *, const char *, void *) = (void *)dlsym(lib, "shaderc_compile_into_spv");
@@ -44,7 +45,7 @@ int main(void) {
     fclose(f);
     snprintf(path, sizeof path, "%s/%s_b.json", dir, key);
     f = fopen(path, "w");
-    fprintf(f, "{\"stage\":\"cs\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"sbuf\",\"reg\":0}],\"vertex_inputs\":[]}\n");
+    fprintf(f, "{\"stage\":\"cs\",\"entry\":\"main\",\"bindings\":[{\"arg_id\":1,\"kind\":\"sbuf\",\"reg\":0},{\"arg_id\":2,\"kind\":\"sbuf\",\"reg\":1}],\"vertex_inputs\":[]}\n");
     fclose(f);
 
     int g_fail = 0;
@@ -72,19 +73,22 @@ int main(void) {
     CHECK(NVNF(nvnProgramSetShaders)(&prog, 1, sd) == 1, "program takes the compute stage");
 
     uint32_t *out = (uint32_t *)(storage + 0x8000);
+    uint32_t *indirect_groups = (uint32_t *)(storage + 0x6000);
     NVNcommandBuffer cb;
     CHECK(NVNF(nvnCommandBufferInitialize)(&cb, &dev) == 1, "command buffer initializes");
     NVNF(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0x10000, 0x10000);
     NVNF(nvnCommandBufferBeginRecording)(&cb);
     NVNF(nvnCommandBufferBindProgram)(&cb, &prog, 0);
     NVNF(nvnCommandBufferBindStorageBuffer)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNbufferAddress)(uintptr_t)out, 64 * 4);
-    NVNF(nvnCommandBufferDispatchCompute)(&cb, 16, 1, 1);
+    NVNF(nvnCommandBufferBindStorageBuffer)(&cb, NVN_SHADER_STAGE_COMPUTE, 1, (NVNbufferAddress)(uintptr_t)indirect_groups, 3 * 4);
+    NVNF(nvnCommandBufferDispatchCompute)(&cb, 1, 1, 1); // shader writes the next command's group counts
+    NVNF(nvnCommandBufferDispatchComputeIndirect)(&cb, (NVNbufferAddress)(uintptr_t)indirect_groups);
     NVNcommandHandle h = NVNF(nvnCommandBufferEndRecording)(&cb);
     NVNF(nvnQueueSubmitCommands)(&q, 1, &h);
     NVNF(nvnQueueFinish)(&q);
     int bad = 0;
     for (uint32_t i = 0; i < 64; i++) if (out[i] != i * 3 + 1) { if (!bad) printf("first mismatch at %u: %u\n", i, out[i]); bad++; }
-    CHECK(bad == 0, "compute wrote all 64 words (first %u, last %u)", out[0], out[63]);
+    CHECK(bad == 0, "indirect compute read its 8x1x1 argument record and wrote all 64 words (first %u, last %u)", out[0], out[63]);
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN COMPUTE TEST FAILED" : "NVN COMPUTE TEST PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }

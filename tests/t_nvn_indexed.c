@@ -107,8 +107,18 @@ int main(void) {
     verts[0] = -0.5f; verts[1] = -0.5f;
     verts[2] =  0.5f; verts[3] = -0.5f;
     verts[4] =  0.0f; verts[5] =  0.5f;
+    verts[6] = -0.9f; verts[7] = -0.4f;
+    verts[8] = -0.6f; verts[9] = -0.4f;
+    verts[10] = -0.6f; verts[11] = 0.4f;
+    verts[12] = -0.9f; verts[13] = 0.4f;
+    verts[14] = 0.6f; verts[15] = -0.4f;
+    verts[16] = 0.9f; verts[17] = -0.4f;
+    verts[18] = 0.9f; verts[19] = 0.4f;
+    verts[20] = 0.6f; verts[21] = 0.4f;
     uint16_t *idx = (uint16_t *)(storage + 0x9000);
     idx[0] = 0; idx[1] = 1; idx[2] = 2;
+    idx[3] = 3; idx[4] = 4; idx[5] = 5; idx[6] = 6;
+    idx[7] = UINT16_MAX; idx[8] = 7; idx[9] = 8; idx[10] = 9; idx[11] = 10;
 
     NVNcommandBuffer cb;
     CHECK(NVNF(nvnCommandBufferInitialize)(&cb, &dev) == 1, "command buffer initializes");
@@ -129,8 +139,15 @@ int main(void) {
     NVNF(nvnVertexStreamStateSetStride)(&vs, 8);
     NVNF(nvnVertexStreamStateSetDivisor)(&vs, 0);
     NVNF(nvnCommandBufferBindVertexStreamState)(&cb, 1, &vs);
-    NVNF(nvnCommandBufferBindVertexBuffer)(&cb, 0, (NVNbufferAddress)(uintptr_t)(storage + 0x8000), 24);
+    NVNF(nvnCommandBufferBindVertexBuffer)(&cb, 0, (NVNbufferAddress)(uintptr_t)(storage + 0x8000), 88);
     NVNF(nvnCommandBufferDrawElements)(&cb, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, (NVNbufferAddress)(uintptr_t)idx);
+    NVNF(nvnCommandBufferSetPrimitiveRestart)(&cb, 1, UINT16_MAX);
+    NVNF(nvnCommandBufferDrawElements)(&cb, NVN_DRAW_PRIMITIVE_QUADS, NVN_INDEX_TYPE_UNSIGNED_SHORT, 9, (NVNbufferAddress)(uintptr_t)(idx + 3));
+    uint32_t *ind = (uint32_t *)(storage + 0xa000);
+    ind[0] = 4; ind[1] = 1; ind[2] = 3; ind[3] = 0; ind[4] = 0;
+    NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
+    NVNF(nvnCommandBufferDrawElementsIndirect)(&cb, NVN_DRAW_PRIMITIVE_QUADS,
+        NVN_INDEX_TYPE_UNSIGNED_SHORT, (NVNbufferAddress)(uintptr_t)idx, (NVNbufferAddress)(uintptr_t)ind);
     NVNcommandHandle h = NVNF(nvnCommandBufferEndRecording)(&cb);
     NVNF(nvnQueueSubmitCommands)(&q, 1, &h);
     NVNF(nvnQueueFinish)(&q);
@@ -141,7 +158,11 @@ int main(void) {
     const uint8_t *corner = px;
     const uint8_t *mid = px + (32 * 64 + 32) * 4;
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
-    CHECK(mid[0] > 200 && mid[1] < 40 && mid[2] < 40, "the draw reached the target centre: %u %u %u", mid[0], mid[1], mid[2]);
+    CHECK(mid[2] > 200 && mid[0] < 40, "the first-index draw left unrelated geometry untouched: %u %u %u", mid[0], mid[1], mid[2]);
+    const uint8_t *indirect_quad = px + (32 * 64 + 8) * 4;
+    CHECK(indirect_quad[0] > 200 && indirect_quad[1] < 40 && indirect_quad[2] < 40,
+          "indexed indirect draw applied firstIndex and expanded its quad: %u %u %u",
+          indirect_quad[0], indirect_quad[1], indirect_quad[2]);
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN INDEXED DRAW TEST FAILED" : "NVN INDEXED DRAW TEST PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }

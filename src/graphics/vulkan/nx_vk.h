@@ -23,6 +23,7 @@ typedef struct {
     VkPhysicalDeviceProperties props;
     VkPhysicalDeviceMemoryProperties memory;
     VkPhysicalDeviceFeatures features;
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing;
     uint32_t queue_family;
     uint32_t queue_count;
     VkQueueFlags queue_flags;

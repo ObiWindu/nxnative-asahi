@@ -2,6 +2,9 @@
 #include "dm.h"
 #include "front.h"
 #include "../gfx/nvn/dmsh_chain.h"
+#ifndef __APPLE__
+#include "graphics/vkapi/vk_api.h"
+#endif
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #include <sys/sysctl.h>
@@ -152,6 +155,9 @@ static void host_preload(int argc, char **argv) {
     }
     if (!n) n = profile_modules(argv[1], names);
     load_modules(argv[1], names, n);
+#ifndef __APPLE__
+    nx_vkapi_set_game_identity(DM_GAME_ID, dm_main_build());
+#endif
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     { void dm_nvn_install(void); dm_nvn_install(); }   // link and initialize the NVN interface table (no-op for Vulkan/GL titles)
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)

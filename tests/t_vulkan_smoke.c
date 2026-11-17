@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define W 256
 #define H 256
@@ -15,6 +17,54 @@
 #include "spv_smoke.h"
 
 #define VKOK(x, what) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { NX_LOGE("%s failed: %d", what, (int)r_); goto fail; } } while (0)
+
+static int pipeline_cache_bad_header_test(NxVk *vk) {
+    char path[] = "/tmp/nxasahi-pipeline-header-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    int ok = 1;
+    for (int test = 0; test < 4 && ok; test++) {
+        VkPipelineCacheHeaderVersionOne h = {0};
+        h.headerSize = sizeof h; h.headerVersion = VK_PIPELINE_CACHE_HEADER_VERSION_ONE;
+        h.vendorID = vk->caps.vendor_id; h.deviceID = vk->caps.device_id;
+        memcpy(h.pipelineCacheUUID, vk->caps.props.pipelineCacheUUID, VK_UUID_SIZE);
+        if (test == 0) h.pipelineCacheUUID[0] ^= 0xff; // stale driver-cache UUID
+        if (test == 1) h.headerSize = 0;              // malformed header extent
+        if (test == 2) h.headerVersion++;             // unsupported header version
+        if (test == 3) h.vendorID++;                  // different device vendor
+        if (ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0 ||
+            write(fd, &h, sizeof h) != (ssize_t)sizeof h) { ok = 0; break; }
+        if (vk->pipeline_cache) vkDestroyPipelineCache(vk->device, vk->pipeline_cache, NULL);
+        vk->pipeline_cache = VK_NULL_HANDLE;
+        if (nx_vk_pipeline_cache_load(vk, path) != 0 || vk->pipeline_cache == VK_NULL_HANDLE) ok = 0;
+    }
+    close(fd);
+    unlink(path);
+    return ok ? 0 : -1;
+}
+
+static int pipeline_cache_corruption_test(NxVk *vk) {
+    char path[] = "/tmp/nxasahi-pipeline-data-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return -1;
+    close(fd);
+    int ok = nx_vk_pipeline_cache_save(vk, path) == 0;
+    // Simulate an interrupted write. The loader must reject this before the
+    // opaque bytes reach the driver, then create a fresh empty cache.
+    fd = ok ? open(path, O_WRONLY) : -1;
+    if (fd < 0 || ftruncate(fd, 8) != 0) ok = 0;
+    if (fd >= 0) close(fd);
+    if (vk->pipeline_cache) vkDestroyPipelineCache(vk->device, vk->pipeline_cache, NULL);
+    vk->pipeline_cache = VK_NULL_HANDLE;
+    if (ok) ok = nx_vk_pipeline_cache_load(vk, path) == 0 && vk->pipeline_cache != VK_NULL_HANDLE;
+    // Persist and reload an implementation-produced cache as a valid roundtrip.
+    if (ok) ok = nx_vk_pipeline_cache_save(vk, path) == 0;
+    if (vk->pipeline_cache) vkDestroyPipelineCache(vk->device, vk->pipeline_cache, NULL);
+    vk->pipeline_cache = VK_NULL_HANDLE;
+    if (ok) ok = nx_vk_pipeline_cache_load(vk, path) == 0 && vk->pipeline_cache != VK_NULL_HANDLE;
+    unlink(path);
+    return ok ? 0 : -1;
+}
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -32,6 +82,11 @@ int main(int argc, char **argv) {
     cfg.device_filter = nx_env("NX_VK_DEVICE");
     if (nx_vk_init(&vk, &cfg) != 0) return 1;
     nx_vk_report(&vk, stdout);
+    if (pipeline_cache_bad_header_test(&vk) != 0) {
+        NX_LOGE("pipeline cache did not recover from a stale driver UUID");
+        nx_vk_shutdown(&vk);
+        return 1;
+    }
 
     VkImage img = VK_NULL_HANDLE;
     VkDeviceMemory img_mem = VK_NULL_HANDLE;
@@ -144,7 +199,11 @@ int main(int argc, char **argv) {
     gp.pViewportState = &vps; gp.pRasterizationState = &rs;
     gp.pMultisampleState = &ms; gp.pColorBlendState = &cbs;
     gp.layout = pl; gp.renderPass = rp; gp.subpass = 0;
-    VKOK(vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &gp, NULL, &pipeline), "vkCreateGraphicsPipelines");
+    VKOK(vkCreateGraphicsPipelines(vk.device, vk.pipeline_cache, 1, &gp, NULL, &pipeline), "vkCreateGraphicsPipelines");
+    if (pipeline_cache_corruption_test(&vk) != 0) {
+        NX_LOGE("pipeline cache did not recover from a truncated file");
+        goto fail;
+    }
 
     VkCommandBufferAllocateInfo cai = {0};
     cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;

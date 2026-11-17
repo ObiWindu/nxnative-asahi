@@ -163,7 +163,20 @@ int nx_vk_init(NxVk *vk, const NxVkConfig *cfg) {
     p2.pNext = &dp;
     vkGetPhysicalDeviceProperties2(vk->physical, &p2);
     vk->caps.props = p2.properties;
-    vkGetPhysicalDeviceFeatures(vk->physical, &vk->caps.features);
+    if (vk->caps.props.apiVersion >= VK_API_VERSION_1_2 ||
+        has_device_ext(vk->physical, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
+        VkPhysicalDeviceDescriptorIndexingFeatures indexing = {0};
+        indexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+        VkPhysicalDeviceFeatures2 features = {0};
+        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features.pNext = &indexing;
+        vkGetPhysicalDeviceFeatures2(vk->physical, &features);
+        vk->caps.features = features.features;
+        vk->caps.descriptor_indexing = indexing;
+        vk->caps.descriptor_indexing.pNext = NULL;
+    } else {
+        vkGetPhysicalDeviceFeatures(vk->physical, &vk->caps.features);
+    }
     vkGetPhysicalDeviceMemoryProperties(vk->physical, &vk->caps.memory);
     vk->caps.api_version = vk->caps.props.apiVersion;
     vk->caps.driver_version = vk->caps.props.driverVersion;
@@ -357,10 +370,19 @@ void nx_vk_report(const NxVk *vk, FILE *out) {
     fprintf(out, "Compute: workgroup %ux%ux%u, shared %u bytes\n",
             vk->caps.props.limits.maxComputeWorkGroupSize[0], vk->caps.props.limits.maxComputeWorkGroupSize[1],
             vk->caps.props.limits.maxComputeWorkGroupSize[2], vk->caps.props.limits.maxComputeSharedMemorySize);
-    fprintf(out, "Features: geometry %d, tessellation %d, dualSrcBlend %d, fragmentStores %d, vertexStores %d, samplerAnisotropy %d\n",
+    fprintf(out, "Features: geometry %d, tessellation %d, dualSrcBlend %d, fragmentStores %d, vertexStores %d, samplerAnisotropy %d, uniformBufferArrayDynamicIndexing %d, sampledImageArrayDynamicIndexing %d, storageBufferArrayDynamicIndexing %d, storageImageArrayDynamicIndexing %d\n",
             vk->caps.features.geometryShader, vk->caps.features.tessellationShader, vk->caps.features.dualSrcBlend,
             vk->caps.features.fragmentStoresAndAtomics, vk->caps.features.vertexPipelineStoresAndAtomics,
-            vk->caps.features.samplerAnisotropy);
+            vk->caps.features.samplerAnisotropy, vk->caps.features.shaderUniformBufferArrayDynamicIndexing,
+            vk->caps.features.shaderSampledImageArrayDynamicIndexing, vk->caps.features.shaderStorageBufferArrayDynamicIndexing,
+            vk->caps.features.shaderStorageImageArrayDynamicIndexing);
+    fprintf(out, "Descriptor indexing: runtimeDescriptorArray %d, sampledImageArrayNonUniformIndexing %d, storageImageArrayNonUniformIndexing %d, partiallyBound %d, variableDescriptorCount %d, sampledImageUpdateAfterBind %d\n",
+            vk->caps.descriptor_indexing.runtimeDescriptorArray,
+            vk->caps.descriptor_indexing.shaderSampledImageArrayNonUniformIndexing,
+            vk->caps.descriptor_indexing.shaderStorageImageArrayNonUniformIndexing,
+            vk->caps.descriptor_indexing.descriptorBindingPartiallyBound,
+            vk->caps.descriptor_indexing.descriptorBindingVariableDescriptorCount,
+            vk->caps.descriptor_indexing.descriptorBindingSampledImageUpdateAfterBind);
     static const VkFormat fmts[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB,
                                     VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D16_UNORM,
                                     VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK,
@@ -530,23 +552,27 @@ int nx_vk_pipeline_cache_load(NxVk *vk, const char *path) {
     size_t size = 0;
     VkPipelineCacheCreateInfo ci = {0};
     ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    if (path && !nx_read_file(path, &data, &size) && size > 32) {
-        VkPipelineCacheHeaderVersionOne h;
-        if (size >= sizeof h) {
+    if (path && !nx_read_file(path, &data, &size)) {
+        if (size >= sizeof(VkPipelineCacheHeaderVersionOne)) {
+            VkPipelineCacheHeaderVersionOne h;
             memcpy(&h, data, sizeof h);
-            if (h.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+            if (h.headerSize >= sizeof h && h.headerSize <= size &&
+                h.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
                 h.vendorID == vk->caps.vendor_id && h.deviceID == vk->caps.device_id &&
-                h.pipelineCacheUUID[0]) {
+                memcmp(h.pipelineCacheUUID, vk->caps.props.pipelineCacheUUID, VK_UUID_SIZE) == 0) {
                 ci.initialDataSize = size;
                 ci.pInitialData = data;
-                NX_LOGI("pipeline cache: loading %zu bytes from %s", size, path);
+                NX_LOGI("pipeline cache: loading %zu bytes for %s / %s", size,
+                        vk->caps.device_name, vk->caps.driver_name);
             } else {
-                NX_LOGW("pipeline cache %s is for another GPU/driver; rebuilding", path);
+                NX_LOGW("pipeline cache %s has a stale or malformed device header; rebuilding", path);
             }
+        } else {
+            NX_LOGW("pipeline cache %s is truncated; rebuilding", path);
         }
-        free(data);
     }
     VkResult r = vkCreatePipelineCache(vk->device, &ci, NULL, &vk->pipeline_cache);
+    free(data);
     if (r != VK_SUCCESS) { NX_LOGE("vkCreatePipelineCache failed: %d", (int)r); vk->pipeline_cache = VK_NULL_HANDLE; return -1; }
     return 0;
 }

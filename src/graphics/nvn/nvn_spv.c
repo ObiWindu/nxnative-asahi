@@ -41,9 +41,15 @@ typedef struct {
     int32_t *array_len;      // array type id -> length type id
 } spv_mod;
 
+static void spv_free(spv_mod *m);
+
+static int spv_id_valid(const spv_mod *m, uint32_t id) {
+    return id > 0 && id < m->bound;
+}
+
 static int spv_parse(const uint32_t *w, size_t n, spv_mod *m) {
     memset(m, 0, sizeof *m);
-    if (n < 5 || w[0] != 0x07230203u) return -1;
+    if (n < 5 || w[0] != 0x07230203u || (w[1] >> 16) != 0x0001u || w[4] != 0) return -1;
     m->words = (uint32_t *)w; m->n = n; m->bound = w[3];
     if (m->bound < 1 || m->bound > 200000) return -1;
     m->type_of = calloc(m->bound, sizeof *m->type_of);
@@ -53,24 +59,68 @@ static int spv_parse(const uint32_t *w, size_t n, spv_mod *m) {
     m->location = malloc(m->bound * sizeof *m->location);
     m->block = calloc(m->bound, 1);   // Block = 1, BufferBlock = 2
     m->array_len = malloc(m->bound * sizeof *m->array_len);
-    if (!m->type_of || !m->types || !m->binding || !m->set || !m->location || !m->block || !m->array_len) return -1;
+    if (!m->type_of || !m->types || !m->binding || !m->set || !m->location || !m->block || !m->array_len) {
+        spv_free(m);
+        return -1;
+    }
     for (uint32_t i = 0; i < m->bound; i++) { m->binding[i] = -1; m->set[i] = -1; m->location[i] = -1; m->array_len[i] = -1; }
     size_t i = 5;
     while (i < n) {
         uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
-        if (!wc || i + wc > n) break;
+        if (!wc || i + wc > n) { spv_free(m); return -1; }
         const uint32_t *o = w + i + 1;
         uint32_t nops = wc - 1;
         switch (op) {
-        case SPV_OP_TYPE_IMAGE: if (nops >= 7) { m->type_of[o[0]] = SPV_OP_TYPE_IMAGE; m->types[o[0]].sampled = o[6]; m->types[o[0]].dim = o[2]; } break;
-        case SPV_OP_TYPE_SAMPLER: if (nops >= 1) m->type_of[o[0]] = SPV_OP_TYPE_SAMPLER; break;
-        case SPV_OP_TYPE_SAMPLED_IMAGE: if (nops >= 2) { m->type_of[o[0]] = SPV_OP_TYPE_SAMPLED_IMAGE; m->types[o[0]].elem = o[1]; } break;
-        case SPV_OP_TYPE_ARRAY: if (nops >= 3) { m->type_of[o[0]] = SPV_OP_TYPE_ARRAY; m->types[o[0]].elem = o[1]; m->array_len[o[0]] = (int32_t)o[2]; } break;
-        case SPV_OP_TYPE_RUNTIME_ARRAY: if (nops >= 2) { m->type_of[o[0]] = SPV_OP_TYPE_RUNTIME_ARRAY; m->types[o[0]].elem = o[1]; } break;
-        case SPV_OP_TYPE_STRUCT: if (nops >= 1) m->type_of[o[0]] = SPV_OP_TYPE_STRUCT; break;
+        case SPV_OP_TYPE_IMAGE:
+            if (nops >= 8) {
+                if (!spv_id_valid(m, o[0])) { spv_free(m); return -1; }
+                m->type_of[o[0]] = SPV_OP_TYPE_IMAGE; m->types[o[0]].sampled = o[6]; m->types[o[0]].dim = o[2];
+            } else { spv_free(m); return -1; }
+            break;
+        case SPV_OP_TYPE_SAMPLER:
+            if (nops >= 1) {
+                if (!spv_id_valid(m, o[0])) { spv_free(m); return -1; }
+                m->type_of[o[0]] = SPV_OP_TYPE_SAMPLER;
+            } else { spv_free(m); return -1; }
+            break;
+        case SPV_OP_TYPE_SAMPLED_IMAGE:
+            if (nops >= 2) {
+                if (!spv_id_valid(m, o[0]) || !spv_id_valid(m, o[1])) { spv_free(m); return -1; }
+                m->type_of[o[0]] = SPV_OP_TYPE_SAMPLED_IMAGE; m->types[o[0]].elem = o[1];
+            } else { spv_free(m); return -1; }
+            break;
+        case SPV_OP_TYPE_ARRAY:
+            if (nops >= 3) {
+                if (!spv_id_valid(m, o[0]) || !spv_id_valid(m, o[1]) || !spv_id_valid(m, o[2])) { spv_free(m); return -1; }
+                m->type_of[o[0]] = SPV_OP_TYPE_ARRAY; m->types[o[0]].elem = o[1]; m->array_len[o[0]] = (int32_t)o[2];
+            } else { spv_free(m); return -1; }
+            break;
+        case SPV_OP_TYPE_RUNTIME_ARRAY:
+            if (nops >= 2) {
+                if (!spv_id_valid(m, o[0]) || !spv_id_valid(m, o[1])) { spv_free(m); return -1; }
+                m->type_of[o[0]] = SPV_OP_TYPE_RUNTIME_ARRAY; m->types[o[0]].elem = o[1];
+            } else { spv_free(m); return -1; }
+            break;
+        case SPV_OP_TYPE_STRUCT:
+            if (nops >= 1) {
+                if (!spv_id_valid(m, o[0])) { spv_free(m); return -1; }
+                for (uint32_t j = 1; j < nops; j++) if (!spv_id_valid(m, o[j])) { spv_free(m); return -1; }
+                m->type_of[o[0]] = SPV_OP_TYPE_STRUCT;
+            } else { spv_free(m); return -1; }
+            break;
+        case SPV_OP_TYPE_POINTER:
+            if (nops < 3 || !spv_id_valid(m, o[0]) || !spv_id_valid(m, o[2])) { spv_free(m); return -1; }
+            break;
+        case SPV_OP_CONSTANT:
+            if (nops < 3 || !spv_id_valid(m, o[0]) || !spv_id_valid(m, o[1])) { spv_free(m); return -1; }
+            break;
+        case SPV_OP_VARIABLE:
+            if (nops < 3 || !spv_id_valid(m, o[0]) || !spv_id_valid(m, o[1])) { spv_free(m); return -1; }
+            break;
         case SPV_OP_DECORATE:
             if (nops >= 2) {
                 uint32_t id = o[0], dec = o[1];
+                if (!spv_id_valid(m, id)) { spv_free(m); return -1; }
                 if (dec == SPV_DEC_BINDING && nops >= 3) m->binding[id] = (int32_t)o[2];
                 else if (dec == SPV_DEC_DESCRIPTOR_SET && nops >= 3) m->set[id] = (int32_t)o[2];
                 else if (dec == SPV_DEC_BLOCK) m->block[id] = 1;
@@ -91,7 +141,7 @@ static void spv_free(spv_mod *m) {
 }
 
 static uint32_t spv_const_value(const spv_mod *m, uint32_t type_id) {
-    if (!type_id || type_id >= m->n) return 0;
+    if (!spv_id_valid(m, type_id)) return 0;
     size_t i = 5;
     while (i + 3 < m->n) {
         uint32_t wc = m->words[i] >> 16, op = m->words[i] & 0xffff;
@@ -109,7 +159,11 @@ static VkDescriptorType spv_descriptor(const spv_mod *m, uint32_t type_id, uint3
         uint32_t k = m->type_of[type_id];
         if (k == SPV_OP_TYPE_ARRAY || k == SPV_OP_TYPE_RUNTIME_ARRAY) {
             if (k == SPV_OP_TYPE_RUNTIME_ARRAY) *count = 0;
-            else { uint32_t len = m->array_len[type_id] >= 0 ? spv_const_value(m, (uint32_t)m->array_len[type_id]) : 0; if (len) *count *= len; }
+            else {
+                uint32_t len = m->array_len[type_id] >= 0 ? spv_const_value(m, (uint32_t)m->array_len[type_id]) : 0;
+                if (!len || (*count && *count > UINT32_MAX / len)) return VK_DESCRIPTOR_TYPE_MAX_ENUM;
+                *count *= len;
+            }
             type_id = m->types[type_id].elem;
             continue;
         }
@@ -142,6 +196,7 @@ static int spv_reflect(const spv_mod *m, nvn_desc_bind *out, int max) {
         if (!wc || i + wc > m->n) break;
         if (op == SPV_OP_VARIABLE && wc >= 4) {
             uint32_t type_id = m->words[i + 1], id = m->words[i + 2], sc = m->words[i + 3];
+            if (!spv_id_valid(m, type_id) || !spv_id_valid(m, id)) return n;
             int32_t binding = m->binding[id], set = m->set[id];
             if (binding >= 0 && (sc == SPV_STORAGE_UNIFORM_CONSTANT || sc == SPV_STORAGE_UNIFORM || sc == SPV_STORAGE_STORAGE_BUFFER)) {
                 // type_id is a pointer: its pointee is the variable's type

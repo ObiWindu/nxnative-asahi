@@ -49,10 +49,10 @@ int main(void) {
         "void main(){ gl_Position=vec4(pos,0,1); }\n";
     const char *fs_src =
         "#version 450\n"
-        "layout(set=0,binding=1) uniform CB { vec4 tint; } cb;\n"
-        "layout(set=0,binding=2) uniform sampler2D tex;\n"
+        "layout(set=0,binding=1) uniform CB { vec4 tint; int index; } cb;\n"
+        "layout(set=0,binding=2) uniform sampler2D tex[17];\n"
         "layout(location=0) out vec4 outColor;\n"
-        "void main(){ outColor=vec4(texture(tex,vec2(0.5)).rgb*0.5 + cb.tint.rgb*0.5, 1); }\n";
+        "void main(){ outColor=vec4((texture(tex[0],vec2(0.5)).rgb + texture(tex[cb.index],vec2(0.5)).rgb)*0.25 + cb.tint.rgb*0.5, 1); }\n";
     uint8_t *vsp = NULL, *fsp = NULL; size_t vsn = 0, fsn = 0;
     if (compile_shader(lib, vs_src, 0, "t.vert", &vsp, &vsn) || compile_shader(lib, fs_src, 1, "t.frag", &fsp, &fsn)) {
         printf("FAIL: shaderc compile\n"); return 1;
@@ -84,7 +84,7 @@ int main(void) {
     NVNF(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage);
     CHECK(NVNF(nvnMemoryPoolInitialize)(&pool, &pb) == 1, "memory pool initializes");
     NVNtexturePool tpool; NVNsamplerPool spool;
-    CHECK(NVNF(nvnTexturePoolInitialize)(&tpool, &pool, 0x20000, 8) == 1, "texture pool initializes");
+    CHECK(NVNF(nvnTexturePoolInitialize)(&tpool, &pool, 0x20000, 32) == 1, "texture pool initializes");
     CHECK(NVNF(nvnSamplerPoolInitialize)(&spool, &pool, 0x30000, 8) == 1, "sampler pool initializes");
     NVNqueueBuilder qb; NVNqueue q;
     static uint8_t qmem[1 << 20] __attribute__((aligned(4096)));
@@ -102,26 +102,33 @@ int main(void) {
     NVNF(nvnTextureBuilderSetStorage)(&tb, &pool, 0);
     CHECK(NVNF(nvnTextureInitialize)(&tex, &tb) == 1, "render target texture initializes");
 
-    // A 1x1 red source texture, registered at id 1 in the pool.
-    NVNtextureBuilder stb; NVNtexture src;
+    // Seventeen 1x1 source textures, registered at consecutive IDs and NVN
+    // slots. The shader dynamically indexes element 16 to exercise the array
+    // path above its former 16-element scratch limit.
+    enum { ARRAY_TEX_COUNT = 17 };
+    NVNtextureBuilder stb; NVNtexture src[ARRAY_TEX_COUNT];
     NVNF(nvnTextureBuilderSetDefaults)(&stb); NVNF(nvnTextureBuilderSetDevice)(&stb, &dev);
     NVNF(nvnTextureBuilderSetTarget)(&stb, NVN_TEXTURE_TARGET_2D);
     NVNF(nvnTextureBuilderSetSize2D)(&stb, 1, 1);
     NVNF(nvnTextureBuilderSetFormat)(&stb, NVN_FORMAT_RGBA8);
     NVNF(nvnTextureBuilderSetFlags)(&stb, NVN_TEXTURE_FLAGS_LINEAR);
-    NVNF(nvnTextureBuilderSetStorage)(&stb, &pool, 0x40000);
-    CHECK(NVNF(nvnTextureInitialize)(&src, &stb) == 1, "source texture initializes");
-    uint8_t *spx = (uint8_t *)(storage + 0x40000);
-    spx[0] = 255; spx[1] = 0; spx[2] = 0; spx[3] = 255;
-    NVNF(nvnTexturePoolRegisterTexture)(&tpool, 1, &src, NULL);
+    for (int i = 0; i < ARRAY_TEX_COUNT; i++) {
+        uint64_t off = 0x40000 + (uint64_t)i * 0x1000;
+        NVNF(nvnTextureBuilderSetStorage)(&stb, &pool, off);
+        CHECK(NVNF(nvnTextureInitialize)(&src[i], &stb) == 1, "array source texture %d initializes", i);
+        uint8_t *spx = storage + off;
+        spx[0] = i == 16 ? 0 : 255; spx[1] = i == 16 ? 255 : 0; spx[2] = 0; spx[3] = 255;
+        NVNF(nvnTexturePoolRegisterTexture)(&tpool, i + 1, &src[i], NULL);
+    }
     NVNsamplerBuilder sb; NVNsampler smp;
     NVNF(nvnSamplerBuilderSetDefaults)(&sb); NVNF(nvnSamplerBuilderSetDevice)(&sb, &dev);
     CHECK(NVNF(nvnSamplerInitialize)(&smp, &sb) == 1, "sampler initializes");
     NVNF(nvnSamplerPoolRegisterSampler)(&spool, 1, &smp);
 
     // Uniform slot 0 for the fragment stage: the shader's c[3] (cbuf reg 3).
-    float *tint = (float *)(storage + 0x50000);
+    float *tint = (float *)(storage + 0x60000);
     tint[0] = 0; tint[1] = 0; tint[2] = 1; tint[3] = 1;
+    *(uint32_t *)(storage + 0x60010) = 16;
 
     static uint8_t ctl_vs[0x880], ctl_ps[0x880];
     ctl_ps[0] = 1;
@@ -146,8 +153,9 @@ int main(void) {
     float blue[4] = {0, 0, 1, 1};
     NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
     NVNF(nvnCommandBufferBindProgram)(&cb, &prog, 3);
-    NVNF(nvnCommandBufferBindUniformBuffer)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, (NVNbufferAddress)(uintptr_t)tint, 16);
-    NVNF(nvnCommandBufferBindTexture)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, (NVNtextureHandle)(1 | (1 << 20)));
+    NVNF(nvnCommandBufferBindUniformBuffer)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, (NVNbufferAddress)(uintptr_t)tint, 32);
+    for (int i = 0; i < ARRAY_TEX_COUNT; i++)
+        NVNF(nvnCommandBufferBindTexture)(&cb, NVN_SHADER_STAGE_FRAGMENT, i, (NVNtextureHandle)((i + 1) | (1 << 20)));
     NVNvertexAttribState va;
     NVNF(nvnVertexAttribStateSetDefaults)(&va);
     NVNF(nvnVertexAttribStateSetFormat)(&va, NVN_FORMAT_RG32F, 0);
@@ -170,8 +178,8 @@ int main(void) {
     const uint8_t *corner = px;
     const uint8_t *mid = px + (32 * 64 + 32) * 4;
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
-    CHECK(mid[0] > 80 && mid[0] < 200 && mid[1] < 40 && mid[2] > 80 && mid[2] < 200,
-          "sampled red texture + blue tint reached the centre: %u %u %u", mid[0], mid[1], mid[2]);
+    CHECK(mid[0] > 40 && mid[0] < 100 && mid[1] > 40 && mid[1] < 100 && mid[2] > 100 && mid[2] < 180,
+          "both array textures + blue tint reached the centre: %u %u %u", mid[0], mid[1], mid[2]);
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN TEXTURE TEST FAILED" : "NVN TEXTURE TEST PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }

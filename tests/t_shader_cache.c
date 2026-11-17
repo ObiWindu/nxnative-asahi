@@ -99,6 +99,84 @@ int main(void) {
     }
     if (!saw_tex || !saw_cb) { printf("FAIL: fragment descriptor types (tex %d, cb %d)\n", saw_tex, saw_cb); return 1; }
     nvn_shader_free(&fs);
+
+    // Keep the distinction between a fixed descriptor array and an unsized
+    // runtime array. The NVN replay can lay out the former in Vulkan, but does
+    // not yet populate array elements; runtime arrays additionally require
+    // descriptor-indexing features and layout flags. In particular, zero
+    // must not be rewritten to one by the layout path.
+    const char *array_src =
+        "#version 450\n"
+        "layout(set=0,binding=4) uniform sampler2D tex[2];\n"
+        "layout(location=0) out vec4 outColor;\n"
+        "void main(){ outColor=texture(tex[1],vec2(0.5)); }\n";
+    const char *runtime_src =
+        "#version 450\n"
+        "#extension GL_EXT_nonuniform_qualifier : require\n"
+        "layout(set=0,binding=5) uniform sampler2D tex[];\n"
+        "layout(location=0) out vec4 outColor;\n"
+        "void main(){ outColor=texture(tex[nonuniformEXT(0)],vec2(0.5)); }\n";
+    shaderc_compilation_result_t fa = compile(c, array_src, strlen(array_src), 1, "t.array.frag", "main", o);
+    shaderc_compilation_result_t fr = compile(c, runtime_src, strlen(runtime_src), 1, "t.runtime.frag", "main", o);
+    if (!fa || status(fa) != 0 || !fr || status(fr) != 0) {
+        printf("FAIL: shaderc descriptor-array compile: %s\n", (fr && status(fr)) ? errmsg(fr) : (fa ? errmsg(fa) : "no result"));
+        return 1;
+    }
+    const char *array_key = "1111111111111111", *runtime_key = "2222222222222222";
+    const char *keys[] = {array_key, runtime_key};
+    shaderc_compilation_result_t results[] = {fa, fr};
+    for (int i = 0; i < 2; i++) {
+        snprintf(path, sizeof path, "%s/%s_b.spv", dir, keys[i]);
+        f = fopen(path, "wb");
+        if (!f || fwrite(bytes(results[i]), 1, length(results[i]), f) != length(results[i])) { printf("FAIL: write descriptor-array SPIR-V\n"); return 1; }
+        fclose(f);
+        snprintf(path, sizeof path, "%s/%s_b.json", dir, keys[i]);
+        f = fopen(path, "w");
+        if (!f) { printf("FAIL: write descriptor-array JSON\n"); return 1; }
+        fprintf(f, "{\"stage\":\"pixel\",\"bindings\":[{\"arg_id\":1,\"kind\":\"tex\",\"reg\":4}]}\n");
+        fclose(f);
+    }
+    nvn_shader arr;
+    if (nvn_shader_load(dir, array_key, &arr) != 0 || arr.ndesc != 1 || arr.desc[0].count != 2) {
+        printf("FAIL: fixed descriptor array reflection (count %u)\n", arr.ndesc ? arr.desc[0].count : 0);
+        return 1;
+    }
+    nvn_shader_free(&arr);
+    nvn_shader runtime;
+    if (nvn_shader_load(dir, runtime_key, &runtime) != 0 || runtime.ndesc != 1 || runtime.desc[0].count != 0) {
+        printf("FAIL: runtime descriptor array reflection (count %u)\n", runtime.ndesc ? runtime.desc[0].count : 1);
+        return 1;
+    }
+    nvn_shader_free(&runtime);
+
+    // Cache files can be interrupted or damaged. Reject malformed instruction
+    // streams and IDs outside the module's declared bound before reflection
+    // indexes any parser tables.
+    snprintf(path, sizeof path, "%s/%s_b.spv", dir, key);
+    size_t spv_size = length(rv);
+    uint32_t *bad_spv = malloc(spv_size + sizeof(uint32_t));
+    if (!bad_spv) { printf("FAIL: allocate malformed SPIR-V fixture\n"); return 1; }
+    memcpy(bad_spv, bytes(rv), spv_size);
+    bad_spv[3] = 1; // The module contains IDs outside this declared bound.
+    f = fopen(path, "wb");
+    int wrote = f && fwrite(bad_spv, 1, spv_size, f) == spv_size;
+    if (f) fclose(f);
+    nvn_shader malformed;
+    if (!wrote || nvn_shader_load(dir, key, &malformed) == 0) {
+        free(bad_spv);
+        printf("FAIL: out-of-bound SPIR-V IDs were accepted\n");
+        return 1;
+    }
+    memcpy(bad_spv, bytes(rv), spv_size);
+    bad_spv[spv_size / sizeof(uint32_t)] = 1; // zero-word-count trailing instruction
+    f = fopen(path, "wb");
+    wrote = f && fwrite(bad_spv, 1, spv_size + sizeof(uint32_t), f) == spv_size + sizeof(uint32_t);
+    if (f) fclose(f);
+    free(bad_spv);
+    if (!wrote || nvn_shader_load(dir, key, &malformed) == 0) {
+        printf("FAIL: malformed SPIR-V instruction stream was accepted\n");
+        return 1;
+    }
     printf("SHADER CACHE TEST PASSED\n");
     return 0;
 }

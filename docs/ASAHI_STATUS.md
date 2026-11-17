@@ -28,7 +28,13 @@ development environment, so the first real game bring-up is still open.
   append/release/volume/statistics, virtual output device, input stubs).
 - Game preparation from an NSP folder, a Switch 2 `.nup` container or a dump
   folder: extraction, module rewrite, shader split, SPIR-V build, per-profile
-  runtime, and a launcher-ready game folder. NUP and dump builds need no keys.
+  runtime, and a launcher-ready game folder. Detected direct-Vulkan games with
+  packaged SPIR-V skip the NVN shader chain and pass their modules to the guest
+  Vulkan path. Runtime-generated Vulkan SPIR-V can be captured on Linux and
+  validated into a descriptor, specialization and pipeline-layout inventory
+  for the game package.
+  Pipeline-state precompilation from those captures is not implemented. NUP and
+  dump builds need no keys.
 - Graphical launcher: game library scan, keyboard navigation, per-game settings
   (frame rate, render scale, mute), local save backup/restore/delete, and launch with
   the prepared game folder and environment.
@@ -64,8 +70,9 @@ development environment, so the first real game bring-up is still open.
   - texture/sampler/UBO/SSBO/storage-image descriptor binding, semantic NVN
     slots, combined texture handles and bindless handles read from the game's
     own uniform buffers (`tex_ubo`, `samp_ubo`, `img_ubo`, `tbuf_ubo`);
-  - compute dispatches from the translated SPIR-V with SSBO/image/UBO bindings,
-    `imageStore` and storage-buffer copy-back to guest memory;
+  - direct and indirect compute dispatches from translated SPIR-V with
+    SSBO/image/UBO bindings, `imageStore` and storage-buffer copy-back to guest
+    memory; indirect counts are bounds-checked against device limits;
   - presentation through a Vulkan swapchain created from the SDL3 window
     (letterboxed blit), plus a headless path that reports "no surface" instead
     of pretending to present.
@@ -85,13 +92,14 @@ Vulkan 1.4.354): **38 tests, 38 passed (two skip when the driver has no presenti
 |---|---|
 | `memory_16k` | Host page 16384, guest page 4096, permission groups, PROT_NONE fault, memfd aliases, dirty spans, generated AArch64 code returns 42 |
 | `vulkan_smoke` | Real Honeykrisp device, real shaders, offscreen triangle, centre and corner readback |
-| `vkapi_smoke` | Guest-facing Vulkan interception: instance, `VK_NN_vi_surface`, Tegra-shaped device, real image/memory/clear/readback |
+| `vkapi_smoke` | Guest-facing Vulkan interception: instance, `VK_NN_vi_surface`, Tegra-shaped device, real image/memory/clear/readback, SPIR-V capture and pipeline-stage metadata |
 | `synth_guest` | Synthetic NSO: load, relocate, TSD discovery, `DT_INIT`, native entry, `nnMain returned` |
 | `synth_vk_guest` | Synthetic NSO importing `vkCreateInstance` through a JUMP_SLOT, resolved to a real Mesa instance |
 | `shader_cache` | SPIR-V + reflection JSON loading, descriptor type reflection (UBO, combined image sampler), `c1`, vertex inputs |
 | `nvn_vk` | NVN device/queue/program/command buffer, clear through a real render pass, guest readback |
-| `nvn_draw` | Full general NVN draw: SPIR-V pipeline from the shader cache, vertex attributes/stream/buffer, DrawArrays, GPU readback; headless present returns a ticket |
-| `nvn_texture` | NVN texture pool, sampler pool, registered 1×1 red texture, fragment-stage UBO, combined texture+sampler descriptor, expected blended colour |
+| `nvn_draw` | General NVN draw: SPIR-V pipeline, vertex state, primitive expansion and indirect calls; fragment `imageStore` survives completion and is verified by guest texture readback; headless present returns a ticket |
+| `nvn_texture` | NVN texture/sampler pools, fragment UBO and a 17-element combined texture/sampler array; shader dynamically samples element 16 and the readback matches the expected blend |
+| `nvn_compute` | Compute dispatch writes the group-count record for the following indirect dispatch; the second dispatch reads the GPU-produced counts and writes all 64 expected SSBO values |
 | `nvn_tex_ubo` | A texture handle written into the game's own uniform buffer (`tex_ubo`) is read at draw time and sampled |
 | `audio_out` | `AudioOut` HLE: open, format queries, start, four appends, four release-queue returns through the PCM sink, stop/close |
 | `audio_pcm` | PCM sink buffer lifecycle, real device or timed silent sink |
@@ -104,9 +112,9 @@ Vulkan 1.4.354): **38 tests, 38 passed (two skip when the driver has no presenti
 | `nvn_3d` | 3D texture slices uploaded, `sampler3D` slice 1 readback |
 | `nvn_msaa` | 4× MSAA draw, `nvnCommandBufferDownsample` resolve, readback |
 | `nvn_indexed` | Indexed NVN draw from a guest index buffer, GPU readback |
-| `nvn_copy` | Buffer→texture→texture→buffer copy round trip through the Vulkan replay |
+| `nvn_copy` | Buffer↔texture copies with row/image strides; 2D array layers, selected mip/layer views, exact copies, 3D slices, nearest scaling, X mirroring, and R11G11B10F→RGBA16F conversion verify on readback |
 | `nvn_compute` | NVN compute program, storage buffer binding, DispatchCompute, results copied back to guest memory |
-| `nvn_compute_image` | Compute `imageStore` into a guest texture and readback |
+| `nvn_compute_image` | Dynamically indexed two-element storage-image array writes distinct values to mipmapped 2D array textures at layer 1; an explicit all-bits NVN barrier precedes a second dispatch that reads both images and copies verified values to an SSBO |
 | `nvn_depth` | NVN near=-w depth rewrite; `gl_FragCoord.z` is 0.25 for clip z=-0.5 |
 | `nvn_depth_geometry` | A geometry shader emitting clip z=-0.5 is rewritten before `EmitVertex`; the centre reads z=0.25 instead of being clipped |
 | `nvn_depth_zero` | NVN near=0 mode leaves clip z=0.5 unchanged |
@@ -133,11 +141,14 @@ window-specific part is swapchain creation, image acquisition and presentation.
 1. **Real game bring-up.** No legal game or homebrew NRO/NSP was available. The
    loader, SVC surface, filesystem, HID, audio and NVN paths have only synthetic
    tests so far. This is the single largest unknown.
+   Direct-Vulkan import, runtime capture, and captured-inventory packaging are
+   still not exercised with a real title.
 2. **Presentation validation.** Swapchain creation/present is implemented but
    not exercised in a real desktop session.
-3. **NVN2 mesh/task stages**, bindless pools, descriptor arrays, storage-image
-   atomics, transform feedback, sparse pools and DLSS equivalents are not
-   replayed. They are refused with a red line. Advanced blend modes beyond the
+3. **NVN2 mesh/task stages**, bindless pools, runtime and UBO/c2 descriptor
+   arrays, storage-image atomics, transform feedback, sparse pools and DLSS
+   equivalents are not replayed. They are refused with a red line. Fixed
+   direct texture/sampler arrays are replayed element-by-element. Advanced blend modes beyond the
    fixed-function Porter-Duff set (multiply, screen, overlay, HSL and the other
    shader-dependent modes) are not applied; they fall back to the state's blend
    functions with a red line. Alpha test, logic operations, Porter-Duff
@@ -147,9 +158,11 @@ window-specific part is swapchain creation, image acquisition and presentation.
    the launcher selects a per-profile runtime binary (`nxnative-<title id>`) or
    the generic `nxnative-asahi`. Building one binary that loads any profile at
    run time is a larger refactor of the generated profile constants.
-5. **NVN performance.** No performance work yet: no pipeline cache warm-up for
-   NVN, no descriptor reuse, per-draw host buffer allocation, per-frame CPU
-   deswizzle for CPU-written display textures, and a verbose logging default.
+5. **NVN performance.** Runtime graphics and compute pipelines use a persisted
+   Vulkan pipeline cache with device/driver UUID validation. Full captured-state
+   precompilation is not implemented. Descriptor reuse, per-draw host buffer
+   allocation, per-frame CPU deswizzle for CPU-written display textures, and a
+   verbose logging default remain performance work.
 6. **Movie decode, web applet, controller applet, software keyboard, camera**
    remain stubs or partial.
 7. **Packaging.** `packaging/build_rpm.sh` builds a local Fedora RPM

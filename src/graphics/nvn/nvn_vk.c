@@ -25,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+extern int nvn_host_readable(uint64_t address, uint64_t size);
+
 typedef struct {
     uint64_t lo, hi;
 } pool_ent;
@@ -40,10 +42,18 @@ typedef struct {
     VkRenderPass rp;
     VkFramebuffer fb;
     VkImageViewType view_type;
-    uint32_t layers, samples;
+    VkImageAspectFlags aspect;
+    uint32_t layers, levels, samples;
     VkImageLayout layout;
     int gpu_dirty;                    // last write was ours; otherwise the guest memory is uploaded
 } tex_ent;
+
+// `layout` is tracked once per NVN texture, so every explicit transition must
+// cover the complete Vulkan image. This keeps mip and array subresources in
+// the same layout state as the texture-level tracker.
+static VkImageSubresourceRange tex_subresources(const tex_ent *e) {
+    return (VkImageSubresourceRange){e->aspect, 0, e->levels, 0, e->layers};
+}
 
 typedef struct {
     uint64_t serial;
@@ -74,6 +84,7 @@ static tex_ent *g_texs; static int g_ntex, g_ctex;
 static prog_ent *g_progs; static int g_nprog;
 static samp_ent *g_samps; static int g_nsamp, g_csamp;
 static _Atomic uint64_t g_fence, g_completed;
+static _Atomic uint64_t g_vk_barriers;
 static uint64_t g_last_fence;
 static VkCommandBuffer g_cb;
 static post_event g_post[64]; static int g_npost;
@@ -198,7 +209,7 @@ static void copy_image_to_guest(const tex_t *t, tex_ent *e, VkCommandBuffer cb) 
     b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = e->img; b.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.image = e->img; b.subresourceRange = tex_subresources(e);
     b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
     size_t row = (size_t)w * 4, bytes = row * h;
@@ -312,7 +323,7 @@ static tex_ent *tex_ensure(const tex_t *t) {
     vi.image = e->img; vi.viewType = view_type; vi.format = e->fmt;
     vi.subresourceRange = (VkImageSubresourceRange){aspect, 0, levels, 0, layers};
     if (vkCreateImageView(g_vk.device, &vi, NULL, &e->view) != VK_SUCCESS) { nx_vk_destroy_image(&g_vk, e->img, e->mem); e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE; return NULL; }
-    e->view_type = view_type; e->layers = layers; e->samples = samples;
+    e->view_type = view_type; e->aspect = aspect; e->layers = layers; e->levels = levels; e->samples = samples;
     e->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     e->gpu_dirty = 0;
     return e;
@@ -323,7 +334,7 @@ static void clear_texture(const tex_t *t, const p_clear_color *c) {
     if (!e) return;
     VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
     if (!cb) return;
-    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, t->d.levels ? t->d.levels : 1, 0, 1};
+    VkImageSubresourceRange range = tex_subresources(e);
     VkImageMemoryBarrier b = {0};
     b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -476,24 +487,24 @@ void mtl_reg_samp(int id, const samp_par *p) {
 void mtl_set_tex_pool_n(int n) { (void)n; }
 void mtl_set_samp_pool_n(int n) { (void)n; }
 
-// Read a texture level back from the GPU into the guest's linear buffer. The
-// NVN copy routines use this for GetTextureData; the test draw uses it to prove
-// the pixels landed. Only the common 2D level-0 case is implemented; other
-// requests report a red line rather than returning stale bytes.
+// Read one 2D or 2D-array mip/layer back into the guest's linear buffer.
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
     (void)img;
     if (!t || !dst) return;
     tex_ent *e = tex_ensure(t);
     if (!e) return;
     if (e->samples > 1) { warn_once(&g_draw_warned, "readback of a multisampled texture"); return; }
-    if (level != 0 || layer0 != 0 || t->d.target == NVN_TEXTURE_TARGET_3D || t->d.target == NVN_TEXTURE_TARGET_1D) {
-        warn_once(&g_draw_warned, "texture readback of a non-2D level");
+    if (level >= e->levels || layer0 >= e->layers || t->d.target == NVN_TEXTURE_TARGET_3D || t->d.target == NVN_TEXTURE_TARGET_1D) {
+        warn_once(&g_draw_warned, "texture readback of an unsupported subresource");
         return;
     }
-    uint32_t w = t->d.width ? t->d.width : 1, h = t->d.height ? t->d.height : 1;
+    uint32_t w = t->d.width >> level, h = t->d.height >> level;
+    if (!w) w = 1;
+    if (!h) h = 1;
     int bw = 0, bh = 0;
     int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (bpb <= 0 || bw != 1 || bh != 1) { warn_once(&g_draw_warned, "texture readback of a block-compressed format"); return; }
+    if (w > SIZE_MAX / (size_t)bpb || (size_t)w * (size_t)bpb > SIZE_MAX / h) return;
     size_t src_row = (size_t)w * (size_t)bpb, bytes = src_row * h;
     VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void *map = NULL;
     if (nx_vk_create_buffer(&g_vk, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -504,11 +515,11 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = e->img; b.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.image = e->img; b.subresourceRange = tex_subresources(e);
     b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
     VkBufferImageCopy cp = {0};
-    cp.imageSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    cp.imageSubresource = (VkImageSubresourceLayers){e->aspect, level, layer0, 1};
     cp.imageExtent = (VkExtent3D){w, h, 1};
     vkCmdCopyImageToBuffer(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &cp);
     VkBufferMemoryBarrier bb = {0};
@@ -522,16 +533,19 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
     nx_vk_oneshot_end(&g_vk, cb);
     e->layout = VK_IMAGE_LAYOUT_GENERAL;
-    if (map) for (uint32_t y = 0; y < h; y++) {
-        size_t n = row < src_row ? row : src_row;
-        if (r && r->height > 0 && (int)y >= r->yoffset) {
-            uint32_t ry = y - (uint32_t)r->yoffset;
-            if ((int)ry >= r->height) break;
-            size_t x0 = r->xoffset > 0 ? (size_t)r->xoffset * bpb : 0;
-            n = (r && r->width > 0 ? (size_t)r->width * bpb : src_row);
-            if (x0 + n > src_row) n = src_row > x0 ? src_row - x0 : 0;
-            memcpy(dst + (size_t)ry * row, (uint8_t *)map + (size_t)y * src_row + x0, n);
-        } else memcpy(dst + (size_t)y * row, (uint8_t *)map + (size_t)y * src_row, n);
+    if (map) {
+        uint32_t x0 = r && r->xoffset > 0 ? (uint32_t)r->xoffset : 0;
+        uint32_t y0 = r && r->yoffset > 0 ? (uint32_t)r->yoffset : 0;
+        uint32_t cw = r && r->width > 0 ? (uint32_t)r->width : w;
+        uint32_t ch = r && r->height > 0 ? (uint32_t)r->height : h;
+        if (x0 > w) x0 = w;
+        if (y0 > h) y0 = h;
+        if (cw > w - x0) cw = w - x0;
+        if (ch > h - y0) ch = h - y0;
+        size_t n = (size_t)cw * (size_t)bpb;
+        if (n > row) n = row;
+        for (uint32_t y = 0; y < ch; y++)
+            memcpy(dst + (size_t)y * row, (uint8_t *)map + (size_t)(y0 + y) * src_row + (size_t)x0 * (size_t)bpb, n);
     }
     vkUnmapMemory(g_vk.device, mem);
     nx_vk_destroy_buffer(&g_vk, buf, mem);
@@ -682,7 +696,7 @@ static int upload_guest_texture(const tex_t *t, tex_ent *e) {
     b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = e->img;
-    b.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+    b.subresourceRange = tex_subresources(e);
     b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
     vkCmdCopyBufferToImage(cb, buf, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nc, copies);
@@ -808,7 +822,7 @@ void mtl_exec(const uint8_t *p) {
             b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = e->img; b.subresourceRange = (VkImageSubresourceRange){nvn_view_aspect(g_rt.depth->d.format), 0, 1, 0, 1};
+            b.image = e->img; b.subresourceRange = tex_subresources(e);
             b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
             VkClearDepthStencilValue v = {c->depth, (uint32_t)c->stencil};
@@ -820,7 +834,12 @@ void mtl_exec(const uint8_t *p) {
             e->layout = VK_IMAGE_LAYOUT_GENERAL; e->gpu_dirty = 1;
             break;
         }
-        case OP_BARRIER: break;
+        case OP_BARRIER: {
+            int32_t bits = 0;
+            if (h.size >= sizeof(op_hdr) + sizeof bits) memcpy(&bits, a, sizeof bits);
+            nvkd_barrier(bits);
+            break;
+        }
         case OP_DRAW: {
             p_draw dt; const p_draw *d = draw_rec(a, h.size, &dt);
 #ifdef NXNATIVE_TEST_SHADERS
@@ -842,7 +861,7 @@ void mtl_exec(const uint8_t *p) {
             break;
         }
         case OP_DRAW_TEX: warn_once(&g_draw_warned, "NVN DrawTexture"); break;
-        case OP_MULTI_DRAW: warn_once(&g_draw_warned, "NVN multi-draw"); break;
+        case OP_MULTI_DRAW: nvkd_multi_draw((const p_multi_draw *)a); break;
         case OP_TF_BIND: case OP_TF_STATE: warn_once(&g_draw_warned, "NVN transform feedback"); break;
         case OP_WAIT_EVENT: case OP_WAIT_SYNC: warn_once(&g_draw_warned, "NVN wait on an event or sync"); break;
         case OP_RENDER_COND: warn_once(&g_draw_warned, "NVN conditional rendering"); break;
@@ -895,7 +914,10 @@ uint64_t mtl_upload_bytes(void) { return 0; }
 void mtl_create_stats(uint64_t *lib, uint64_t *pso) { if (lib) *lib = 0; if (pso) *pso = 0; }
 void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns) { if (lib_ns) *lib_ns = 0; if (pso_ns) *pso_ns = 0; }
 void mtl_res_stats(char *out, size_t n) { if (out && n) out[0] = 0; }
-void mtl_barrier_stats(uint64_t *skip, uint64_t *full) { if (skip) *skip = 0; if (full) *full = 0; }
+void mtl_barrier_stats(uint64_t *skip, uint64_t *full) {
+    if (skip) *skip = 0;
+    if (full) *full = atomic_load_explicit(&g_vk_barriers, memory_order_relaxed);
+}
 void mtl_dispatch_barrier_stats(uint64_t *a, uint64_t *b, uint64_t *c, uint64_t *d) { if (a) *a = 0; if (b) *b = 0; if (c) *c = 0; if (d) *d = 0; }
 uint64_t mtl_cut_count(void) { return 0; }
 uint64_t mtl_copy_cut_count(void) { return 0; }

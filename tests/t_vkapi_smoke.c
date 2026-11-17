@@ -4,10 +4,14 @@
 // is required, so this runs headless on a server.
 #include "graphics/vkapi/vk_api.h"
 #include "platform/linux/nx_platform.h"
+#include "spv_smoke.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_vi.h>
 
@@ -16,7 +20,11 @@ static int g_fail;
 #define VKF(n) ((PFN_##n)nx_vkapi_lookup(#n))
 
 int main(void) {
+    char capture_dir[] = "/tmp/nx-vk-capture-XXXXXX";
+    CHECK(mkdtemp(capture_dir) != NULL, "shader capture directory created");
+    setenv("NX_VK_SHADER_CAPTURE_DIR", capture_dir, 1);
     if (nx_vkapi_init() != 0) return 1;
+    nx_vkapi_set_game_identity("0100000000000000", "00112233445566778899aabbccddeeff");
 
     PFN_vkEnumerateInstanceExtensionProperties enum_inst_ext = VKF(vkEnumerateInstanceExtensionProperties);
     CHECK(enum_inst_ext != NULL, "vkEnumerateInstanceExtensionProperties is in the guest entry table");
@@ -86,6 +94,135 @@ int main(void) {
     VkQueue queue = VK_NULL_HANDLE;
     getq(dev, family, 0, &queue);
     CHECK(queue != VK_NULL_HANDLE, "device queue returned");
+
+    PFN_vkCreateShaderModule create_shader = VKF(vkCreateShaderModule);
+    PFN_vkDestroyShaderModule destroy_shader = VKF(vkDestroyShaderModule);
+    VkShaderModuleCreateInfo smci = {0}; smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smci.codeSize = sizeof k_vs_spv; smci.pCode = k_vs_spv;
+    VkShaderModule shader = VK_NULL_HANDLE;
+    CHECK(create_shader && create_shader(dev, &smci, NULL, &shader) == VK_SUCCESS && shader,
+          "shader module created through the interception layer");
+    int captured = 0, capture_metadata = 0;
+    DIR *capture = opendir(capture_dir);
+    if (capture) {
+        struct dirent *de;
+        while ((de = readdir(capture))) {
+            size_t len = strlen(de->d_name);
+            if (len == 20 && !strcmp(de->d_name + 16, ".spv")) {
+                char path[512]; snprintf(path, sizeof path, "%s/%s", capture_dir, de->d_name);
+                FILE *f = fopen(path, "rb"); uint32_t words[sizeof k_vs_spv / sizeof k_vs_spv[0]];
+                if (f && fread(words, 1, sizeof words, f) == sizeof words && !memcmp(words, k_vs_spv, sizeof words)) captured = 1;
+                if (f) fclose(f);
+                snprintf(path, sizeof path, "%s/%.*s.json", capture_dir, 16, de->d_name);
+                f = fopen(path, "rb");
+                if (f) { char meta[512] = {0}; size_t n = fread(meta, 1, sizeof meta - 1, f); fclose(f); capture_metadata = n && strstr(meta, "\"code_size\"") && strstr(meta, "\"sha256\"") && strstr(meta, "0100000000000000") && strstr(meta, "00112233445566778899aabbccddeeff"); }
+            }
+        }
+        closedir(capture);
+    }
+    CHECK(captured, "capture wrote byte-identical, content-addressed SPIR-V");
+    CHECK(capture_metadata, "capture wrote size, full digest, title ID and main build ID metadata");
+    VkShaderModule fragment_shader = VK_NULL_HANDLE;
+    smci.codeSize = sizeof k_fs_spv; smci.pCode = k_fs_spv;
+    CHECK(create_shader && create_shader(dev, &smci, NULL, &fragment_shader) == VK_SUCCESS && fragment_shader,
+          "fragment module created for stage metadata capture");
+    PFN_vkCreateRenderPass create_rp = VKF(vkCreateRenderPass);
+    PFN_vkCreateDescriptorSetLayout create_dsl = VKF(vkCreateDescriptorSetLayout);
+    PFN_vkDestroyDescriptorSetLayout destroy_dsl = VKF(vkDestroyDescriptorSetLayout);
+    PFN_vkCreatePipelineLayout create_pl = VKF(vkCreatePipelineLayout);
+    PFN_vkCreateGraphicsPipelines create_pipelines = VKF(vkCreateGraphicsPipelines);
+    PFN_vkDestroyPipeline destroy_pipeline = VKF(vkDestroyPipeline);
+    PFN_vkDestroyPipelineLayout destroy_pl = VKF(vkDestroyPipelineLayout);
+    PFN_vkDestroyRenderPass destroy_rp = VKF(vkDestroyRenderPass);
+    VkAttachmentDescription att = {0}; att.format = VK_FORMAT_R8G8B8A8_UNORM; att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = att.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference ref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub = {0}; sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1; sub.pColorAttachments = &ref;
+    VkRenderPassCreateInfo rpci = {0}; rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpci.attachmentCount = 1; rpci.pAttachments = &att; rpci.subpassCount = 1; rpci.pSubpasses = &sub;
+    VkRenderPass rp = VK_NULL_HANDLE;
+    CHECK(create_rp && create_rp(dev, &rpci, NULL, &rp) == VK_SUCCESS && rp, "render pass created for stage capture pipeline");
+    VkDescriptorSetLayoutBinding dsl_binding = {0};
+    dsl_binding.binding = 3; dsl_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    dsl_binding.descriptorCount = 2; dsl_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    VkDescriptorSetLayoutCreateInfo dslci = {0}; dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dslci.bindingCount = 1; dslci.pBindings = &dsl_binding;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    CHECK(create_dsl && create_dsl(dev, &dslci, NULL, &dsl) == VK_SUCCESS && dsl,
+          "descriptor set layout created for binding metadata capture");
+    VkPushConstantRange pcr = {VK_SHADER_STAGE_VERTEX_BIT, 16, 32};
+    VkPipelineLayoutCreateInfo plci = {0}; plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount = 1; plci.pSetLayouts = &dsl;
+    plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    CHECK(create_pl && create_pl(dev, &plci, NULL, &pl) == VK_SUCCESS && pl, "pipeline layout created for stage capture pipeline");
+    VkPipelineShaderStageCreateInfo stages[2] = {{0}};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = shader; stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fragment_shader; stages[1].pName = "main";
+    VkVertexInputBindingDescription vbind = {0, 8, VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription vattr = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    VkPipelineVertexInputStateCreateInfo vi = {0}; vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vbind;
+    vi.vertexAttributeDescriptionCount = 1; vi.pVertexAttributeDescriptions = &vattr;
+    VkPipelineInputAssemblyStateCreateInfo ia = {0}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport vp = {0, 0, 32, 32, 0, 1}; VkRect2D sc = {{0, 0}, {32, 32}};
+    VkPipelineViewportStateCreateInfo vps = {0}; vps.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vps.viewportCount = 1; vps.pViewports = &vp; vps.scissorCount = 1; vps.pScissors = &sc;
+    VkPipelineRasterizationStateCreateInfo rs = {0}; rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1;
+    VkPipelineMultisampleStateCreateInfo ms = {0}; ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState cba = {0}; cba.colorWriteMask = 0xf;
+    VkPipelineColorBlendStateCreateInfo cbs = {0}; cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cbs.attachmentCount = 1; cbs.pAttachments = &cba;
+    VkGraphicsPipelineCreateInfo gp = {0}; gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gp.stageCount = 2; gp.pStages = stages; gp.pVertexInputState = &vi; gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vps; gp.pRasterizationState = &rs; gp.pMultisampleState = &ms;
+    gp.pColorBlendState = &cbs; gp.layout = pl; gp.renderPass = rp;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    CHECK(create_pipelines && create_pipelines(dev, VK_NULL_HANDLE, 1, &gp, NULL, &pipeline) == VK_SUCCESS && pipeline,
+          "graphics pipeline created through the interception layer");
+    int captured_vertex_stage = 0, captured_fragment_stage = 0, captured_layout = 0;
+    capture = opendir(capture_dir);
+    if (capture) {
+        struct dirent *de;
+        while ((de = readdir(capture))) {
+            if (!strstr(de->d_name, ".use-") || !strstr(de->d_name, ".json")) continue;
+            char path[512], meta[2048] = {0}; snprintf(path, sizeof path, "%s/%s", capture_dir, de->d_name);
+            FILE *f = fopen(path, "rb"); if (!f) continue;
+            size_t n = fread(meta, 1, sizeof meta - 1, f); fclose(f);
+            if (n && strstr(meta, "\"entry_point\":\"main\"")) {
+                if (strstr(meta, "\"pipeline_layout_key\":\"")) {
+                    char *key = strstr(meta, "\"pipeline_layout_key\":\"");
+                    if (key) {
+                        key += strlen("\"pipeline_layout_key\":\"");
+                        char layout_path[512], layout_json[2048] = {0};
+                        snprintf(layout_path, sizeof layout_path, "%s/layout-%.*s.json", capture_dir, 16, key);
+                        FILE *lf = fopen(layout_path, "rb");
+                        if (lf) { size_t ln = fread(layout_json, 1, sizeof layout_json - 1, lf); fclose(lf);
+                            captured_layout = ln && strstr(layout_json, "descriptor_set_layout") && strstr(layout_json, "\"binding\":3") &&
+                                              strstr(layout_json, "\"descriptor_count\":2") && strstr(layout_json, "\"push_constant_ranges\":[{\"stage_flags\":1,\"offset\":16,\"size\":32}"); }
+                    }
+                }
+                if (strstr(meta, "\"stage\":\"vert\"")) captured_vertex_stage = 1;
+                if (strstr(meta, "\"stage\":\"frag\"")) captured_fragment_stage = 1;
+            }
+        }
+        closedir(capture);
+    }
+    CHECK(captured_vertex_stage && captured_fragment_stage,
+          "capture recorded stage and entry-point metadata for both pipeline shaders");
+    CHECK(captured_layout, "capture recorded descriptor bindings and push-constant ranges with the pipeline stages");
+    if (pipeline && destroy_pipeline) destroy_pipeline(dev, pipeline, NULL);
+    if (pl && destroy_pl) destroy_pl(dev, pl, NULL);
+    if (dsl && destroy_dsl) destroy_dsl(dev, dsl, NULL);
+    if (rp && destroy_rp) destroy_rp(dev, rp, NULL);
+    if (destroy_shader && shader) destroy_shader(dev, shader, NULL);
+    if (destroy_shader && fragment_shader) destroy_shader(dev, fragment_shader, NULL);
 
     PFN_vkGetPhysicalDeviceMemoryProperties memprops = VKF(vkGetPhysicalDeviceMemoryProperties);
     VkPhysicalDeviceMemoryProperties mp;

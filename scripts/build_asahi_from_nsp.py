@@ -45,6 +45,24 @@ def run(args, **kw):
     subprocess.run([str(a) for a in args], check=True, **kw)
 
 
+def shader_workflow(src):
+    """Select preparation by detected graphics/shader inputs, not title name."""
+    gfx = src['graphics'][0]
+    if gfx == 'nvn':
+        for on, key in ((src['glslc_capture'][0], 'GLSLC capture'),
+                        (src['vk_capture'][0], 'Vulkan runtime capture'),
+                        (src['gl_capture'][0], 'OpenGL runtime capture'),
+                        (src['ue_decode'][0], 'Unreal shader decode'),
+                        (src['oodle_packs'][0], 'Oodle shader packs'),
+                        (src['ue_legacy'][0], 'legacy Unreal shaders')):
+            if on:
+                fail(f'{key} needs a host capture/decode path that is not wired into the Asahi preparation script yet')
+        return 'nvn'
+    if gfx == 'vulkan':
+        return 'vulkan'
+    fail(f'this is a {gfx} title; the Asahi preparation path currently supports NVN shaders and packaged direct-Vulkan SPIR-V')
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('nsp_dir', help='an NSP folder, a .nup file (or the folder holding it), or a dump folder (base/, updates/, dlc/)')
@@ -52,6 +70,7 @@ def main(argv=None):
     ap.add_argument('-p', '--package', help='version to prepare (default: the newest in the folder)')
     ap.add_argument('--title-id', help='the game to pick when the folder holds several')
     ap.add_argument('--work-dir', help='build folder (default: <title id>_build beside the NSP folder)')
+    ap.add_argument('--vk-capture-dir', help='validate and package a Linux Vulkan capture made with NX_VK_SHADER_CAPTURE_DIR')
     ap.add_argument('--skip-shaders', action='store_true', help='do not build the shader cache')
     ap.add_argument('--skip-host', action='store_true', help='do not build the Asahi runtime')
     ap.add_argument('--allow-damaged', action='store_true', help='pack files a NUP/dump/hash check reports damaged, instead of stopping')
@@ -176,14 +195,26 @@ def main(argv=None):
 
     game = dirs[pkg_ver]
     src = pg.build_sources(game / 'ExeFS', rfs.source(game), g.modules_in(game / 'ExeFS'))
-    gfx = src['graphics'][0]
-    if gfx != 'nvn':
-        fail(f'this is a {gfx} title; the Asahi preparation path currently builds NVN shader packages only')
-    for on, key in ((src['glslc_capture'][0], 'glslc'), (src['vk_capture'][0], 'vulkan capture'),
-                    (src['gl_capture'][0], 'OpenGL capture'), (src['ue_decode'][0], 'Unreal shader decode'),
-                    (src['oodle_packs'][0], 'Oodle shader packs'), (src['ue_legacy'][0], 'legacy Unreal shaders')):
-        if on:
-            fail(f'{key} needs the host capture/decode path, which is not wired into the Asahi preparation script yet')
+    workflow = shader_workflow(src)
+    vk_capture_dir = Path(a.vk_capture_dir).expanduser().resolve() if a.vk_capture_dir else None
+    if vk_capture_dir and workflow != 'vulkan':
+        fail('--vk-capture-dir is only valid for a detected direct-Vulkan title')
+    if vk_capture_dir and not vk_capture_dir.is_dir():
+        fail(f'Vulkan capture directory does not exist: {vk_capture_dir}')
+    capture_package = work / 'vk_capture_package'
+    capture_report = work / 'vk_capture_manifest.json'
+    if vk_capture_dir:
+        capture_cmd = [py, repo / 'dm/gfx/tools/vk_capture.py', str(vk_capture_dir),
+                       '--output', str(capture_report), '--copy-to', str(capture_package)]
+        expected_capture = g.dir / 'vk_capture.tsv'
+        if expected_capture.is_file():
+            capture_cmd += ['--expected-tsv', str(expected_capture), '--require-complete']
+        capture_log = logs / 'vk_capture_import.log'
+        try:
+            with capture_log.open('w') as f:
+                run(capture_cmd, stdout=f, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError:
+            fail(f'Vulkan capture validation failed; see {capture_log}')
 
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(tmp))
     aoc = nsp.extract_aoc(nx, keys, repo, work, app, fam, logs)
@@ -193,7 +224,17 @@ def main(argv=None):
     nsp.chain_header(py, repo, env, logs)
 
     sh = work / 'shader'
-    if not a.skip_shaders:
+    if workflow == 'vulkan':
+        # A direct-Vulkan guest passes its SPIR-V modules to the guest Vulkan
+        # API, which forwards them to Mesa. It does not use the NVN shader
+        # cache or the NVN translator chain. Runtime-generated modules are
+        # captured by the Linux Vulkan layer when NX_VK_SHADER_CAPTURE_DIR is
+        # set for a game run; they remain native Vulkan SPIR-V.
+        libs = None
+        log('direct Vulkan shaders: packaged SPIR-V will be consumed by the guest Vulkan path')
+        if src['vk_capture'][0]:
+            log('runtime Vulkan shaders detected: set NX_VK_SHADER_CAPTURE_DIR to a capture directory when launching the game to collect modules and stage metadata')
+    elif not a.skip_shaders:
         pkey = nsp.split_shaders(py, repo, [rfs.source(dirs[v]) for v in versions],
                                  [dirs[v] / 'ExeFS/main' for v in versions], sh / 'pkg', env, logs, g,
                                  provisional, None, dlc_roms)
@@ -203,10 +244,10 @@ def main(argv=None):
         log(f'shader cache: {libs}')
     else:
         libs = sh / 'cache' / f'b-{nsp.chain_of(repo)}'
-    # The Asahi host reads a shader directory, not the packed .img file (the
-    # one-file reader is a later optimization). Expand the library for it.
-    libdir = work / 'shaders' / f'b-{nsp.chain_of(repo)}'
-    if nsp.shader_lib.exists(libs):
+    # The Asahi NVN host reads a shader directory, not the packed .img file.
+    # Direct Vulkan modules belong to the game and go straight to Mesa.
+    libdir = work / 'shaders' / f'b-{nsp.chain_of(repo)}' if libs is not None else None
+    if libs is not None and nsp.shader_lib.exists(libs):
         libdir.mkdir(parents=True, exist_ok=True)
         view = nsp.shader_lib.view(libs)
         for p in view.iterdir():
@@ -241,10 +282,18 @@ def main(argv=None):
             dst = game_dir / p.name
             if dst.exists() or dst.is_symlink(): dst.unlink()
             os.symlink(p.resolve(), dst)
-    gl = game_dir / 'shaders'; gl.mkdir(exist_ok=True)
-    link = gl / f'b-{nsp.chain_of(repo)}'
-    if link.exists() or link.is_symlink(): link.unlink()
-    if libdir.is_dir(): os.symlink(libdir.resolve(), link, target_is_directory=True)
+    if vk_capture_dir:
+        link = game_dir / 'vk_capture'
+        if link.exists() or link.is_symlink():
+            if link.is_dir() and not link.is_symlink(): shutil.rmtree(link)
+            else: link.unlink()
+        os.symlink(capture_package.resolve(), link, target_is_directory=True)
+        log(f'validated Vulkan runtime capture: {capture_report}')
+    if libdir is not None:
+        gl = game_dir / 'shaders'; gl.mkdir(exist_ok=True)
+        link = gl / f'b-{nsp.chain_of(repo)}'
+        if link.exists() or link.is_symlink(): link.unlink()
+        if libdir.is_dir(): os.symlink(libdir.resolve(), link, target_is_directory=True)
     al = game_dir / 'aoc'
     if al.exists() or al.is_symlink(): al.unlink()
     if aoc:
@@ -255,8 +304,8 @@ def main(argv=None):
     (game_dir / 'temp').mkdir(exist_ok=True)
 
     cmd = [str(host), 'run', str(patched), 'main']
-    runenv = {'DM_ROMFS': str(rfs.source(game)), 'DM_SAVE': str(save), 'DM_TEMP': str(temp),
-              'NX_NVN_SHADER_CACHE': str(libdir)}
+    runenv = {'DM_ROMFS': str(rfs.source(game)), 'DM_SAVE': str(save), 'DM_TEMP': str(temp)}
+    if libdir is not None: runenv['NX_NVN_SHADER_CACHE'] = str(libdir)
     if aoc: runenv['DM_AOC_DIR'] = str(aoc)
     shell = ['#!/bin/sh', '# generated by scripts/build_asahi_from_nsp.py']
     for k, v in runenv.items():
@@ -279,6 +328,10 @@ def main(argv=None):
     log(f'  {runsh}')
     log('or:')
     log('  ' + ' '.join(f'{k}={v}' for k, v in runenv.items()) + ' ' + ' '.join(cmd))
+    if workflow == 'vulkan' and src['vk_capture'][0]:
+        log('capture runtime Vulkan shaders with:')
+        log(f'  NX_VK_SHADER_CAPTURE_DIR={shlex_quote(work / "vk_capture")} {shlex_quote(runsh)}')
+        log('re-import captured shaders with --vk-capture-dir <capture directory> to validate and package their inventory')
     log('')
     log('in the graphical launcher:')
     log(f'  NXNATIVE_GAMES_DIR={work} NXNATIVE_RUNTIME_DIR={rt} {launcher}')

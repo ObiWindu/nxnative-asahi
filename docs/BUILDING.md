@@ -64,7 +64,11 @@ cmake --build build -j"$(nproc)"
 
 The preparation script reads an NSP folder, a Switch 2 `.nup` container, or a
 dump folder (`base/`, `updates/`, `dlc/`), rewrites the code modules, builds the
-shader SPIR-V and compiles the per-profile runtime:
+shader SPIR-V for NVN games and compiles the per-profile runtime. Detected
+direct-Vulkan games with packaged SPIR-V skip the NVN shader chain and pass
+their shader modules to the guest Vulkan path. Runtime-generated Vulkan shader
+modules can be captured during a Linux game run; OpenGL game preparation is
+not supported yet:
 
 ```sh
 python3 scripts/build_asahi_from_nsp.py <NSP folder> -k prod.keys
@@ -95,6 +99,27 @@ profile's modules. The guest filesystem and save services need `DM_ROMFS` and
 sets them; the launcher fills them in automatically. Selecting a game and building its host is a profile-time decision, so
 the launcher looks for `nxnative-<title id>` beside itself or on `PATH` and
 falls back to `nxnative-asahi`:
+
+For a title whose Vulkan shaders are generated at runtime, capture them while
+playing by setting `NX_VK_SHADER_CAPTURE_DIR` on the host process:
+
+```sh
+NX_VK_SHADER_CAPTURE_DIR="$PWD/vk-capture" build/nxnative-asahi run <prepared-game-folder> main
+```
+
+The directory receives content-addressed SPIR-V modules, stage/specialization
+records, descriptor set layouts and push-constant ranges. The driver pipeline cache remains the mechanism that avoids later
+pipeline compilation. Re-run preparation with `--vk-capture-dir` to verify
+SPIR-V digests, reflect resource bindings/constants and package the capture
+inventory beside the prepared game's `game.tsv`:
+
+```sh
+python3 scripts/build_asahi_from_nsp.py <same source> --vk-capture-dir "$PWD/vk-capture"
+```
+
+Captured modules are inventoried for inspection and future precompilation;
+repeat any original import options such as `--keys` or `--package` on this
+command. Pipeline-state precompilation from the inventory is still incomplete.
 
 ```sh
 build/nxnative-launcher              # game library, settings, saves

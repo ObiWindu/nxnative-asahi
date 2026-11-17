@@ -1,11 +1,18 @@
 #define VK_NO_PROTOTYPES
 #include "graphics/vkapi/vk_api.h"
+#include "horizon/linux_compat.h"
 #include "platform/linux/nx_platform.h"
 #include "platform/linux/nx_window.h"
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <inttypes.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_vi.h>
 
@@ -42,6 +49,23 @@ static int g_clamped_queues;
 static VkPipelineCache g_pipeline_cache;
 static int g_pipeline_cache_refs;
 static char g_pipeline_cache_path[1200];
+typedef struct vk_capture_module_ref {
+    uint64_t handle;
+    char key[17];
+    struct vk_capture_module_ref *next;
+} vk_capture_module_ref;
+static vk_capture_module_ref *g_vk_capture_modules;
+typedef struct vk_capture_layout_ref {
+    uint64_t handle;
+    char key[17];
+    struct vk_capture_layout_ref *next;
+} vk_capture_layout_ref;
+static vk_capture_layout_ref *g_vk_capture_set_layouts;
+static vk_capture_layout_ref *g_vk_capture_pipeline_layouts;
+static pthread_mutex_t g_vk_capture_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_vk_capture_tmp_id;
+static char g_vk_capture_title_id[32];
+static char g_vk_capture_build_id[64];
 static VkPipelineCache pipeline_cache_open(void);
 static void pipeline_cache_save(VkPipelineCache cache);
 static void pipeline_cache_path(char *out, size_t n);
@@ -53,6 +77,252 @@ static void *real_device(const char *name) { return g_gdpa ? (void *)g_gdpa(g_de
 #define REAL_G(n) ((PFN_##n)real_global(#n))
 #define REAL_I(n) ((PFN_##n)real_instance(#n))
 #define REAL_D(n) ((PFN_##n)real_device(#n))
+
+static const char *vk_capture_root(void) {
+    const char *p = nx_env("NX_VK_SHADER_CAPTURE_DIR");
+    if (!p || !*p) p = nx_env("DM_VK_CAPTURE");
+    return p && *p ? p : NULL;
+}
+
+static int vk_capture_mkdir(const char *root) {
+    if (mkdir(root, 0755) == 0 || errno == EEXIST) {
+        struct stat st;
+        if (!stat(root, &st) && S_ISDIR(st.st_mode)) return 0;
+    }
+    NX_LOGE("vulkan shader capture: cannot create directory %s (%s)", root, strerror(errno));
+    return -1;
+}
+
+static int vk_capture_write_atomic(const char *path, const void *data, size_t size) {
+    char tmp[1400];
+    unsigned serial = ++g_vk_capture_tmp_id;
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp.%ld.%u", path, (long)getpid(), serial);
+    if (n < 0 || (size_t)n >= sizeof tmp) return -1;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return -1;
+    int ok = fwrite(data, 1, size, f) == size && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = 0;
+    if (ok && rename(tmp, path) == 0) return 0;
+    remove(tmp);
+    return -1;
+}
+
+static const char *vk_capture_layout_key(vk_capture_layout_ref *list, uint64_t handle) {
+    for (vk_capture_layout_ref *p = list; p; p = p->next) if (p->handle == handle) return p->key;
+    return NULL;
+}
+
+static void vk_capture_layout_forget(vk_capture_layout_ref **list, uint64_t handle) {
+    vk_capture_layout_ref **link = list;
+    while (*link) {
+        if ((*link)->handle == handle) { vk_capture_layout_ref *old = *link; *link = old->next; free(old); return; }
+        link = &(*link)->next;
+    }
+}
+
+static int vk_capture_layout_store(const char *json, size_t size, char key[17]) {
+    const char *root = vk_capture_root();
+    if (!root || vk_capture_mkdir(root) != 0) return -1;
+    uint8_t digest[32]; char full[65], path[1200];
+    nx_sha256(json, size, digest);
+    for (unsigned i = 0; i < sizeof digest; i++) snprintf(full + i * 2, 3, "%02x", digest[i]);
+    memcpy(key, full, 16); key[16] = 0;
+    int n = snprintf(path, sizeof path, "%s/layout-%s.json", root, key);
+    if (n < 0 || (size_t)n >= sizeof path) return -1;
+    return vk_capture_write_atomic(path, json, size);
+}
+
+static void vk_capture_set_layout(const VkDescriptorSetLayoutCreateInfo *ci, VkDescriptorSetLayout layout) {
+    const char *root = vk_capture_root();
+    if (!root || !ci || !layout || ci->bindingCount > 4096) return;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo *binding_flags = NULL;
+    for (VkBaseInStructure *p = (VkBaseInStructure *)ci->pNext; p; p = (VkBaseInStructure *)p->pNext)
+        if (p->sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO) { binding_flags = (void *)p; break; }
+    char *json = NULL; size_t size = 0;
+    FILE *f = open_memstream(&json, &size); if (!f) return;
+    fprintf(f, "{\"schema\":1,\"kind\":\"descriptor_set_layout\",\"flags\":%u,\"bindings\":[", ci->flags);
+    for (uint32_t i = 0; i < ci->bindingCount; i++) {
+        const VkDescriptorSetLayoutBinding *b = &ci->pBindings[i];
+        fprintf(f, "%s{\"binding\":%u,\"descriptor_type\":%u,\"descriptor_count\":%u,\"stage_flags\":%u,\"binding_flags\":%u,\"immutable_sampler_count\":%u}",
+                i ? "," : "", b->binding, (unsigned)b->descriptorType, b->descriptorCount, b->stageFlags,
+                binding_flags && i < binding_flags->bindingCount ? binding_flags->pBindingFlags[i] : 0,
+                b->pImmutableSamplers ? b->descriptorCount : 0);
+    }
+    fputs("]}\n", f);
+    if (fclose(f) != 0) { free(json); return; }
+    char key[17];
+    pthread_mutex_lock(&g_vk_capture_mu);
+    int ok = vk_capture_layout_store(json, size, key);
+    if (!ok) {
+        uint64_t h = (uint64_t)(uintptr_t)layout;
+        vk_capture_layout_forget(&g_vk_capture_set_layouts, h);
+        vk_capture_layout_ref *entry = calloc(1, sizeof *entry);
+        if (entry) { entry->handle = h; memcpy(entry->key, key, sizeof key); entry->next = g_vk_capture_set_layouts; g_vk_capture_set_layouts = entry; }
+    } else NX_LOGE("vulkan shader capture: failed to write descriptor layout metadata");
+    pthread_mutex_unlock(&g_vk_capture_mu);
+    free(json);
+}
+
+static void vk_capture_pipeline_layout(const VkPipelineLayoutCreateInfo *ci, VkPipelineLayout layout) {
+    const char *root = vk_capture_root();
+    if (!root || !ci || !layout || ci->setLayoutCount > 64 || ci->pushConstantRangeCount > 4096) return;
+    char *json = NULL; size_t size = 0;
+    FILE *f = open_memstream(&json, &size); if (!f) return;
+    fprintf(f, "{\"schema\":1,\"kind\":\"pipeline_layout\",\"flags\":%u,\"set_layouts\":[", ci->flags);
+    pthread_mutex_lock(&g_vk_capture_mu);
+    for (uint32_t i = 0; i < ci->setLayoutCount; i++) {
+        const char *set_key = vk_capture_layout_key(g_vk_capture_set_layouts, (uint64_t)(uintptr_t)ci->pSetLayouts[i]);
+        fprintf(f, "%s", i ? "," : "");
+        if (set_key) {
+            char path[1200]; snprintf(path, sizeof path, "%s/layout-%s.json", root, set_key);
+            FILE *sf = fopen(path, "rb");
+            if (sf) { fputs("{\"key\":", f); fprintf(f, "\"%s\",\"layout\":", set_key); int ch; while ((ch = fgetc(sf)) != EOF) fputc(ch, f); fclose(sf); fputc('}', f); }
+            else fprintf(f, "{\"key\":\"%s\",\"unavailable\":true}", set_key);
+        } else fputs("{\"key\":null,\"unavailable\":true}", f);
+    }
+    pthread_mutex_unlock(&g_vk_capture_mu);
+    fputs("],\"push_constant_ranges\":[", f);
+    for (uint32_t i = 0; i < ci->pushConstantRangeCount; i++) {
+        const VkPushConstantRange *r = &ci->pPushConstantRanges[i];
+        fprintf(f, "%s{\"stage_flags\":%u,\"offset\":%u,\"size\":%u}", i ? "," : "", r->stageFlags, r->offset, r->size);
+    }
+    fputs("]}\n", f);
+    if (fclose(f) != 0) { free(json); return; }
+    char key[17];
+    pthread_mutex_lock(&g_vk_capture_mu);
+    int ok = vk_capture_layout_store(json, size, key);
+    if (!ok) {
+        uint64_t h = (uint64_t)(uintptr_t)layout;
+        vk_capture_layout_forget(&g_vk_capture_pipeline_layouts, h);
+        vk_capture_layout_ref *entry = calloc(1, sizeof *entry);
+        if (entry) { entry->handle = h; memcpy(entry->key, key, sizeof key); entry->next = g_vk_capture_pipeline_layouts; g_vk_capture_pipeline_layouts = entry; }
+    } else NX_LOGE("vulkan shader capture: failed to write pipeline layout metadata");
+    pthread_mutex_unlock(&g_vk_capture_mu);
+    free(json);
+}
+
+static void vk_capture_json_string(char *out, size_t cap, const char *s) {
+    size_t n = 0;
+    if (!cap) return;
+    out[n++] = '"';
+    for (; s && *s && n + 7 < cap; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { out[n++] = '\\'; out[n++] = (char)c; }
+        else if (c < 0x20) { n += (size_t)snprintf(out + n, cap - n, "\\u%04x", c); }
+        else out[n++] = (char)c;
+    }
+    if (n + 2 <= cap) { out[n++] = '"'; out[n] = 0; }
+    else out[cap - 1] = 0;
+}
+
+static void vk_capture_module_write(const VkShaderModuleCreateInfo *ci, VkShaderModule module) {
+    const char *root = vk_capture_root();
+    if (!root || !ci || !ci->pCode || !ci->codeSize || ci->codeSize > (256u << 20)) return;
+    uint8_t digest[32];
+    nx_sha256(ci->pCode, ci->codeSize, digest);
+    char full[65], key[17];
+    for (unsigned i = 0; i < sizeof digest; i++) snprintf(full + i * 2, 3, "%02x", digest[i]);
+    memcpy(key, full, 16); key[16] = 0;
+    pthread_mutex_lock(&g_vk_capture_mu);
+    if (vk_capture_mkdir(root) != 0) { pthread_mutex_unlock(&g_vk_capture_mu); return; }
+    char path[1200], side[1200], title[256], build[256], meta[1200];
+    snprintf(path, sizeof path, "%s/%s.spv", root, key);
+    snprintf(side, sizeof side, "%s/%s.json", root, key);
+    const char *env_title = g_vk_capture_title_id[0] ? g_vk_capture_title_id : nx_env("DM_GAME_ID");
+    const char *env_build = g_vk_capture_build_id[0] ? g_vk_capture_build_id : nx_env("DM_GAME_BUILD_ID");
+    vk_capture_json_string(title, sizeof title, env_title ?: "");
+    vk_capture_json_string(build, sizeof build, env_build ?: "");
+    int m = snprintf(meta, sizeof meta,
+        "{\"schema\":1,\"key\":\"%s\",\"sha256\":\"%s\",\"code_size\":%zu,\"title_id\":%s,\"build_id\":%s}\n",
+        key, full, ci->codeSize, title, build);
+    int existing = 0;
+    FILE *old = fopen(path, "rb");
+    if (old) {
+        existing = 1;
+        if (fseek(old, 0, SEEK_END) != 0 || (size_t)ftell(old) != ci->codeSize || fseek(old, 0, SEEK_SET) != 0) existing = -1;
+        else {
+            uint8_t *buf = malloc(ci->codeSize);
+            if (!buf || fread(buf, 1, ci->codeSize, old) != ci->codeSize || memcmp(buf, ci->pCode, ci->codeSize)) existing = -1;
+            free(buf);
+        }
+        fclose(old);
+    }
+    int ok = m > 0 && (size_t)m < sizeof meta && existing >= 0;
+    if (ok && !existing) ok = vk_capture_write_atomic(path, ci->pCode, ci->codeSize) == 0;
+    if (ok) ok = vk_capture_write_atomic(side, meta, (size_t)m) == 0;
+    if (!ok) NX_LOGE("vulkan shader capture: failed to write module %s (%zu bytes)", key, ci->codeSize);
+    else NX_LOGI("vulkan shader capture: module %s (%zu bytes)", key, ci->codeSize);
+    if (ok && module) {
+        uint64_t h = (uint64_t)(uintptr_t)module;
+        vk_capture_module_ref *entry = g_vk_capture_modules;
+        while (entry && entry->handle != h) entry = entry->next;
+        if (!entry) { entry = calloc(1, sizeof *entry); if (entry) { entry->next = g_vk_capture_modules; g_vk_capture_modules = entry; } }
+        if (entry) { entry->handle = h; memcpy(entry->key, key, sizeof key); }
+    }
+    pthread_mutex_unlock(&g_vk_capture_mu);
+}
+
+static const char *vk_capture_stage_name(VkShaderStageFlagBits stage) {
+    switch (stage) {
+    case VK_SHADER_STAGE_VERTEX_BIT: return "vert";
+    case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT: return "tesc";
+    case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT: return "tese";
+    case VK_SHADER_STAGE_GEOMETRY_BIT: return "geom";
+    case VK_SHADER_STAGE_FRAGMENT_BIT: return "frag";
+    case VK_SHADER_STAGE_COMPUTE_BIT: return "comp";
+    default: return "other";
+    }
+}
+
+static void vk_capture_stage(const VkPipelineShaderStageCreateInfo *stage, VkPipelineLayout pipeline_layout) {
+    const char *root = vk_capture_root();
+    if (!root || !stage || !stage->module || !stage->pName) return;
+    char key[17] = {0};
+    uint64_t h = (uint64_t)(uintptr_t)stage->module;
+    pthread_mutex_lock(&g_vk_capture_mu);
+    for (vk_capture_module_ref *p = g_vk_capture_modules; p; p = p->next) if (p->handle == h) { memcpy(key, p->key, sizeof key); break; }
+    if (!key[0]) {
+        NX_LOGW("vulkan shader capture: pipeline references module %#llx that was not captured", (unsigned long long)h);
+        pthread_mutex_unlock(&g_vk_capture_mu); return;
+    }
+    const char *layout_key = pipeline_layout ? vk_capture_layout_key(g_vk_capture_pipeline_layouts, (uint64_t)(uintptr_t)pipeline_layout) : NULL;
+    char entry[512]; vk_capture_json_string(entry, sizeof entry, stage->pName);
+    const VkSpecializationInfo *sp = stage->pSpecializationInfo;
+    size_t ne = sp ? sp->mapEntryCount : 0, nd = sp ? sp->dataSize : 0;
+    if (ne > 4096 || nd > (1u << 20) || (ne && (!sp->pMapEntries || !sp->pData)) || (nd && !sp->pData)) {
+        NX_LOGW("vulkan shader capture: ignoring oversized specialization metadata for %s", key);
+        pthread_mutex_unlock(&g_vk_capture_mu); return;
+    }
+    size_t cap = 1100 + strlen(entry) + ne * 112 + nd * 2;
+    char *json = malloc(cap);
+    if (!json) { pthread_mutex_unlock(&g_vk_capture_mu); return; }
+    char layout_value[20] = "null";
+    if (layout_key) snprintf(layout_value, sizeof layout_value, "\"%s\"", layout_key);
+    size_t at = (size_t)snprintf(json, cap,
+        "{\"schema\":1,\"key\":\"%s\",\"stage\":\"%s\",\"stage_flags\":%u,\"entry_point\":%s,\"pipeline_layout_key\":%s,\"specialization_entries\":[",
+        key, vk_capture_stage_name(stage->stage), (unsigned)stage->stage, entry, layout_value);
+    for (size_t i = 0; i < ne && at < cap; i++) {
+        const VkSpecializationMapEntry *e = &sp->pMapEntries[i];
+        at += (size_t)snprintf(json + at, cap - at, "%s{\"constant_id\":%u,\"offset\":%u,\"size\":%zu}",
+                               i ? "," : "", e->constantID, e->offset, e->size);
+    }
+    if (at < cap) at += (size_t)snprintf(json + at, cap - at, "],\"specialization_data_hex\":\"");
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < nd && at + 2 < cap; i++) { uint8_t b = ((const uint8_t *)sp->pData)[i]; json[at++] = hex[b >> 4]; json[at++] = hex[b & 15]; }
+    if (at + 3 < cap) { json[at++] = '"'; json[at++] = '}'; json[at++] = '\n'; json[at] = 0; }
+    if (at >= cap) {
+        NX_LOGE("vulkan shader capture: stage metadata overflow for %s", key);
+        free(json); pthread_mutex_unlock(&g_vk_capture_mu); return;
+    }
+    uint8_t sig[32]; nx_sha256(json, at, sig);
+    char use_key[17], path[1200];
+    for (unsigned i = 0; i < 8; i++) snprintf(use_key + i * 2, 3, "%02x", sig[i]);
+    snprintf(path, sizeof path, "%s/%s.use-%s.json", root, key, use_key);
+    if (vk_capture_write_atomic(path, json, at) != 0)
+        NX_LOGE("vulkan shader capture: failed to write stage metadata for %s", key);
+    free(json);
+    pthread_mutex_unlock(&g_vk_capture_mu);
+}
 
 static void bind_global_slots(void) {
     for (size_t i = 0; i < nx_vk_slot_count; i++) {
@@ -92,6 +362,10 @@ int nx_vkapi_init(void) {
 void nx_vkapi_set_window(NxWindow *w) { g_window = w; }
 NxWindow *nx_vkapi_window(void) { return g_window; }
 void nx_vkapi_set_present_hook(void (*fn)(void)) { g_present_hook = fn; }
+void nx_vkapi_set_game_identity(const char *title_id, const char *main_build_id) {
+    snprintf(g_vk_capture_title_id, sizeof g_vk_capture_title_id, "%s", title_id ? title_id : "");
+    snprintf(g_vk_capture_build_id, sizeof g_vk_capture_build_id, "%s", main_build_id ? main_build_id : "");
+}
 const char *nx_vkapi_device_name(void) { return g_phys ? "selected" : "none"; }
 
 void *nx_vkapi_lookup(const char *name) {
@@ -464,7 +738,14 @@ VKAPI_ATTR void VKAPI_CALL h_vkDestroyDevice(VkDevice d, const VkAllocationCallb
     }
     PFN_vkDestroyDevice fn = REAL_D(vkDestroyDevice);
     if (fn && d) fn(d, alloc);
-    if (d == g_device) { g_device = VK_NULL_HANDLE; g_queue = VK_NULL_HANDLE; }
+    if (d == g_device) {
+        pthread_mutex_lock(&g_vk_capture_mu);
+        while (g_vk_capture_modules) { vk_capture_module_ref *next = g_vk_capture_modules->next; free(g_vk_capture_modules); g_vk_capture_modules = next; }
+        while (g_vk_capture_set_layouts) { vk_capture_layout_ref *next = g_vk_capture_set_layouts->next; free(g_vk_capture_set_layouts); g_vk_capture_set_layouts = next; }
+        while (g_vk_capture_pipeline_layouts) { vk_capture_layout_ref *next = g_vk_capture_pipeline_layouts->next; free(g_vk_capture_pipeline_layouts); g_vk_capture_pipeline_layouts = next; }
+        pthread_mutex_unlock(&g_vk_capture_mu);
+        g_device = VK_NULL_HANDLE; g_queue = VK_NULL_HANDLE;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL h_vkGetDeviceQueue(VkDevice d, uint32_t family, uint32_t index, VkQueue *q) {
@@ -703,12 +984,58 @@ VKAPI_ATTR VkResult VKAPI_CALL h_vkCreateShaderModule(VkDevice d, const VkShader
     if (!fn) return VK_ERROR_INITIALIZATION_FAILED;
     VkResult r = fn(d, ci, alloc, out);
     if (r != VK_SUCCESS) NX_LOGE("vkCreateShaderModule: real driver rejected %zu bytes: %d", ci->codeSize, (int)r);
+    else if (out) vk_capture_module_write(ci, *out);
     return r;
+}
+VKAPI_ATTR void VKAPI_CALL h_vkDestroyShaderModule(VkDevice d, VkShaderModule module, const VkAllocationCallbacks *alloc) {
+    PFN_vkDestroyShaderModule fn = REAL_D(vkDestroyShaderModule);
+    if (!fn) return;
+    pthread_mutex_lock(&g_vk_capture_mu);
+    uint64_t h = (uint64_t)(uintptr_t)module;
+    vk_capture_module_ref **link = &g_vk_capture_modules;
+    while (*link) {
+        if ((*link)->handle == h) { vk_capture_module_ref *old = *link; *link = old->next; free(old); break; }
+        link = &(*link)->next;
+    }
+    pthread_mutex_unlock(&g_vk_capture_mu);
+    fn(d, module, alloc);
+}
+VKAPI_ATTR VkResult VKAPI_CALL h_vkCreateDescriptorSetLayout(VkDevice d, const VkDescriptorSetLayoutCreateInfo *ci, const VkAllocationCallbacks *alloc, VkDescriptorSetLayout *out) {
+    PFN_vkCreateDescriptorSetLayout fn = REAL_D(vkCreateDescriptorSetLayout);
+    if (!fn) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = fn(d, ci, alloc, out);
+    if (r == VK_SUCCESS && out) vk_capture_set_layout(ci, *out);
+    return r;
+}
+VKAPI_ATTR void VKAPI_CALL h_vkDestroyDescriptorSetLayout(VkDevice d, VkDescriptorSetLayout layout, const VkAllocationCallbacks *alloc) {
+    PFN_vkDestroyDescriptorSetLayout fn = REAL_D(vkDestroyDescriptorSetLayout);
+    if (!fn) return;
+    pthread_mutex_lock(&g_vk_capture_mu);
+    vk_capture_layout_forget(&g_vk_capture_set_layouts, (uint64_t)(uintptr_t)layout);
+    pthread_mutex_unlock(&g_vk_capture_mu);
+    fn(d, layout, alloc);
+}
+VKAPI_ATTR VkResult VKAPI_CALL h_vkCreatePipelineLayout(VkDevice d, const VkPipelineLayoutCreateInfo *ci, const VkAllocationCallbacks *alloc, VkPipelineLayout *out) {
+    PFN_vkCreatePipelineLayout fn = REAL_D(vkCreatePipelineLayout);
+    if (!fn) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = fn(d, ci, alloc, out);
+    if (r == VK_SUCCESS && out) vk_capture_pipeline_layout(ci, *out);
+    return r;
+}
+VKAPI_ATTR void VKAPI_CALL h_vkDestroyPipelineLayout(VkDevice d, VkPipelineLayout layout, const VkAllocationCallbacks *alloc) {
+    PFN_vkDestroyPipelineLayout fn = REAL_D(vkDestroyPipelineLayout);
+    if (!fn) return;
+    pthread_mutex_lock(&g_vk_capture_mu);
+    vk_capture_layout_forget(&g_vk_capture_pipeline_layouts, (uint64_t)(uintptr_t)layout);
+    pthread_mutex_unlock(&g_vk_capture_mu);
+    fn(d, layout, alloc);
 }
 VKAPI_ATTR VkResult VKAPI_CALL h_vkCreateGraphicsPipelines(VkDevice d, VkPipelineCache cache, uint32_t count, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *alloc, VkPipeline *out) {
     PFN_vkCreateGraphicsPipelines fn = REAL_D(vkCreateGraphicsPipelines);
     if (!fn) return VK_ERROR_INITIALIZATION_FAILED;
     if (cache == VK_NULL_HANDLE) cache = g_pipeline_cache;
+    if (ci) for (uint32_t i = 0; i < count; i++)
+        for (uint32_t k = 0; k < ci[i].stageCount; k++) vk_capture_stage(&ci[i].pStages[k], ci[i].layout);
     VkResult r = fn(d, cache, count, ci, alloc, out);
     if (r != VK_SUCCESS) NX_LOGE("vkCreateGraphicsPipelines: %u pipeline(s) failed: %d", count, (int)r);
     return r;
@@ -717,6 +1044,7 @@ VKAPI_ATTR VkResult VKAPI_CALL h_vkCreateComputePipelines(VkDevice d, VkPipeline
     PFN_vkCreateComputePipelines fn = REAL_D(vkCreateComputePipelines);
     if (!fn) return VK_ERROR_INITIALIZATION_FAILED;
     if (cache == VK_NULL_HANDLE) cache = g_pipeline_cache;
+    if (ci) for (uint32_t i = 0; i < count; i++) vk_capture_stage(&ci[i].stage, ci[i].layout);
     VkResult r = fn(d, cache, count, ci, alloc, out);
     if (r != VK_SUCCESS) NX_LOGE("vkCreateComputePipelines: %u pipeline(s) failed: %d", count, (int)r);
     return r;

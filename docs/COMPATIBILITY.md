@@ -50,11 +50,14 @@ games. The original nxnative games table is not a claim about this fork.
 | NVN alpha test | Implemented | A discard test injected before each fragment return, with the alpha function and reference as pipeline specialization constants; tested with LESS/GREATER/ALWAYS/NEVER |
 | NVN advanced blend modes | Implemented (Porter-Duff) | ZERO/SRC/DST/SRC_OVER/DST_OVER/SRC_IN/DST_IN/SRC_OUT/DST_OUT/SRC_ATOP/DST_ATOP/XOR/PLUS use fixed-function factors, with the premultiplied-source and overlap rules; multiply/screen/overlay/HSL and the other shader-dependent modes fall back to the state's blend functions with a red line |
 | NVN logic operations | Implemented | Vulkan logic-op state, which takes the place of blending; tested with COPY/AND/OR/XOR/INVERT/COPY_INVERTED and with blending enabled |
-| NVN compute | Implemented | Compute pipeline, SSBO/image/UBO bindings, imageStore, DispatchCompute, storage-buffer copy-back; tested synthetically |
+| NVN compute | Implemented | Compute pipeline, SSBO/image/UBO bindings, imageStore, direct and indirect dispatch, storage-buffer copy-back; indirect group counts are read after prior synchronous replay and checked against device limits; tested synthetically |
 | NVN geometry | Implemented | One `<key>_bg<n>.spv` per input topology, selected by the draw primitive (points/lines/adjacency/triangles; after tessellation the triangle variant is used); tested synthetically with a point and a triangle draw |
 | NVN tessellation | Implemented | Hull/domain stages and patch-list draws; tested synthetically |
 | NVN2 mesh/task stages | Not implemented | Rejected with a red line |
 | NVN buffer textures | Implemented | `samplerBuffer`/`UNIFORM_TEXEL_BUFFER`, tested synthetically |
+| NVN direct descriptor arrays | Partial | Fixed direct texture/sampler arrays map each element `k` to NVN slot `reg + k`, bounded by the guest slot table and queried device limits; a Honeykrisp draw samples element 0 and dynamically indexes element 16 of a 17-element array. A dynamically indexed two-element storage-image array writes mipmapped 2D arrays at layer 1 in a compute test. Runtime arrays, uniform-buffer/c2 arrays and pool arrays are rejected |
+| NVN primitive lowering | Partial | Quads, quad strips, polygons and line loops are expanded to Vulkan index lists, including primitive-restart segments; synthetic readbacks cover all four modes and an indexed quad separated by restart. Base-vertex and real-game coverage remain |
+| NVN indirect draws | Partial | Arrays and indexed indirect draws, small indirect-count lists and large `OP_MULTI_DRAW` batches are CPU-expanded in replay order; synthetic readbacks pass with Vulkan validation. Correctness depends on synchronous operation completion and incurs per-draw submission overhead; GPU-native indirect execution and real GPU-driven game coverage remain |
 | NVN 2D array textures | Implemented | Every layer uploaded, `sampler2DArray` view, tested synthetically |
 | NVN cubemaps | Implemented | Six faces uploaded, `samplerCube` view, tested synthetically |
 | NVN 3D textures | Implemented | All slices of every level uploaded, `sampler3D` view, tested synthetically |
@@ -64,6 +67,7 @@ games. The original nxnative games table is not a claim about this fork.
 | Vulkan guest API | Implemented | Real-Vulkan interception; synthetic client tested |
 | Vulkan device/WSI | Implemented | Real instance/device/queues/memory, SDL3 surface, swapchain, FIFO present |
 | Shader path for Vulkan titles | Implemented | Guest SPIR-V goes directly to Mesa |
+| Vulkan game preparation | Partial | The Linux importer accepts packaged and runtime-generated direct-Vulkan shader workflows; Linux capture writes content-addressed SPIR-V, stage/specialization records, descriptor layouts and push-constant ranges, and `vk_capture.py` validates, reflects and packages them. Pipeline-state precompilation is incomplete, and no retail Vulkan title has been run |
 | Pipeline cache | Implemented | Persistent, GPU UUID/driver-keyed `VkPipelineCache` |
 | Window/frontend | Implemented | Launcher/library, settings, saves, SDL3 window, keyboard, one gamepad |
 | Multi-game runtime | Incomplete | One binary per profile; launcher picks `nxnative-<title id>` or the generic runtime |

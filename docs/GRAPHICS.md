@@ -13,6 +13,9 @@ At startup the layer queries:
 - core features;
 - queue families and flags;
 - memory heaps and types;
+- core dynamic descriptor-indexing features and Vulkan descriptor-indexing
+  features, including runtime arrays, non-uniform indexing and partially-bound
+  bindings;
 - format features for the formats the emulator needs;
 - limits and compute capabilities.
 
@@ -66,7 +69,9 @@ expansion and texture layout/deswizzle math. The Asahi replay
 Vulkan work:
 
 - device, queues, memory pools, command buffers, submission, fences and events;
-- render targets (colour and depth), clears and barriers;
+- render targets (colour and depth), clears and barriers; `OP_BARRIER` maps
+  defined NVN ordering and invalidate bits to a conservative Vulkan memory
+  dependency across commands;
 - buffer→texture, texture→texture and texture→buffer copies;
 - buffer textures (`samplerBuffer`, `UNIFORM_TEXEL_BUFFER`);
 - 2D array, cube and 3D textures with every layer/slice of every level uploaded;
@@ -83,13 +88,22 @@ Vulkan work:
   the place of blending, and the fixed-function Porter-Duff advanced blend
   modes (multiply/screen/overlay/HSL fall back with a red line);
 - descriptor binding for uniforms, storage buffers, textures, samplers and
-  storage images, using the semantic NVN slots;
+  storage images, using the semantic NVN slots; fixed direct storage-image
+  arrays resolve element `k` from NVN slot `reg + k` and are tracked across
+  compute and graphics submissions; image layout transitions cover all mip
+  levels and array layers of the texture, with same-layout shader dependencies
+  emitted for sampled and storage image uses;
 - indexed, instanced and base-vertex draws;
+- quads, quad strips, polygons and line loops lowered to indexed triangle/line
+  lists, including primitive-restart segmentation (synthetic readbacks cover
+  each mode and an indexed quad with a restart marker);
 - the NVN near=-w depth rewrite (`gl_Position.z = z/2 + w/2`) injected into
   the final vertex-processing stage at its return, or around each `EmitVertex`
   in a geometry stage, with near=0 using the base SPIR-V;
 - compute pipelines and dispatches with SSBO/image/UBO bindings, including
-  storage-buffer copy-back to guest memory;
+  storage-buffer copy-back to guest memory; indirect dispatch counts are read
+  from host-readable guest memory after prior replay work completes, checked
+  against device limits, and dispatched in stream order;
 - geometry shaders from the `<key>_bg<n>.spv` variant matching the draw
   topology (points, lines, adjacency or triangles), and tessellation
   (hull/domain stages, patch-list draws);
@@ -111,12 +125,22 @@ directory named `b-<chain version>`; set `NX_NVN_SHADER_CACHE` or put it in
 AArch64 Linux binaries; `scripts/build_asahi_from_nsp.py` builds a game's cache
 on the machine.
 
-The replay is fail-closed. Unsupported descriptor kinds, bindless pools,
-descriptor arrays and unknown reflection kinds log a `[RED]` line and drop that
+The replay is fail-closed. Fixed arrays of directly bound textures and
+samplers are written element by element from consecutive NVN slots, up to the
+guest slot-table and selected Vulkan device limits. Descriptor write storage
+is sized from each program's reflected count. The `nvn_texture` synthetic test
+samples element 0 and dynamically indexes element 16 in a 17-texture array on
+Honeykrisp. Runtime arrays, uniform-buffer and `c2` handle arrays, pool arrays,
+and other unsupported descriptor kinds still log a `[RED]` line and drop the
 draw/dispatch rather than drawing a wrong picture.
 
-Sparse/virtual pools, DLSS, transform feedback, multi-draw optimizations and the
-Metal pass-merging heuristics are later work.
+Sparse/virtual pools, DLSS, transform feedback, and Metal pass-merging
+heuristics are later work. NVN indirect arrays/indexed draws and indirect-count
+batches are implemented through a CPU-assisted fallback: each prior Vulkan
+operation has completed before replay reads guest arguments/counts, and draws
+are issued in stream order. This is correct for GPU-written arguments in the
+current synchronous replay model, but incurs host readback and per-draw submit
+cost; a GPU-native indirect path remains future performance work.
 
 ## Path C: OpenGL titles
 
@@ -139,6 +163,22 @@ driver. This is lower priority than Vulkan and is not in the current build.
 ## Diagnostics
 
 - `NX_VK_VALIDATION=1` enables the Khronos validation layer when installed.
+- `NX_VK_DEBUG=1` logs bound UBOs and each nonzero c0/c2 driver-bank register
+  with the shader key and stage, including GPU addresses, sizes and handles.
+- Set `NX_VK_SHADER_CAPTURE_DIR=/path/to/capture` when launching a direct
+  Vulkan game to capture runtime shader modules. The layer writes each SPIR-V
+  module atomically as `<sha256-prefix>.spv`, with a JSON sidecar containing
+  its full digest, byte size and available game/build identity. Successful
+  pipeline creation adds stage, entry-point, specialization-constant and
+  pipeline-layout references in content-addressed `.use-*.json` files.
+  Content-addressed `layout-*.json` files record descriptor set binding types,
+  counts, stage/binding flags, immutable-sampler presence and push-constant
+  ranges. The original SPIR-V keeps its resource decorations for offline
+  reflection. Run
+  `python3 dm/gfx/tools/vk_capture.py <capture-dir> --output manifest.json` to
+  verify hashes and produce a sorted resource/constant inventory using the
+  pinned SPIRV-Cross build. Capture is opt-in and logs write failures without
+  interrupting the game.
 - `nxnative-asahi vk-info` prints the capability matrix.
 - Shader module failures log the SPIR-V size and driver result.
 - Pipeline creation failures log the failing pipeline count.
@@ -148,7 +188,8 @@ driver. This is lower priority than Vulkan and is not in the current build.
 ## What is not implemented
 
 - NVN2 mesh/task stages.
-- Buffer textures, bindless pools and transform feedback.
+- Bindless pools and transform feedback. Buffer textures are supported through
+  `samplerBuffer` / `UNIFORM_TEXEL_BUFFER`.
 - The Proton/guest OpenGL path.
 - GPU timing/overlay integration.
 - Explicit memory aliasing for NVN pools (the design is in progress).
