@@ -56,11 +56,14 @@ development environment, so the first real game bring-up is still open.
     events;
   - render targets (colour and depth), clears (including NVN's colour-channel
     and stencil write masks and scissor rectangles) and barriers, including
-    buffer→texture, texture→texture and texture→buffer copies;
+    buffer→texture, texture→texture and texture→buffer copies, including
+    block-compressed textures; CPU texture reads (3D slices, array layers,
+    blocks and resolved multisampled colour targets);
   - `nvnCommandBufferDrawTexture`: a sampled source texel region into a
     destination pixel rectangle of each colour target, with the scissor and the
     channel masks;
-  - NVN textures and samplers, texture-ID and sampler-ID pools, views, CPU and
+  - NVN textures and samplers, texture-ID and sampler-ID pools, views
+    (including channel swizzles), CPU and
     GPU ownership tracking, guest-memory upload and GPU readback;
   - shader cache loading of the translated SPIR-V modules (`<key>_b.spv`)
     with the replay reflection JSON (`<key>_b.json`), automatic descriptor set

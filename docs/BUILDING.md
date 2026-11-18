@@ -201,12 +201,12 @@ surface. Keyboard and gamepad input are read each poll.
 ctest --test-dir build --output-on-failure
 ```
 
-A profile build runs forty tests. A platform-only build (no
+A profile build runs forty-two tests. A platform-only build (no
 `NXNATIVE_GAME`) runs the ten that do not need the guest host: the memory,
 Vulkan, Vulkan-interception, shader-cache, PCM and launcher tests. The NVN
 replay tests and `AudioOut` need a profile.
 
-Forty tests (profile build):
+Forty-two tests (profile build):
 
 | Test | What it proves |
 |---|---|
@@ -231,6 +231,8 @@ Forty tests (profile build):
 | `nvn_indexed` | Indexed draws, primitive expansion, uint8 widening/base vertex, timestamp reports and conditional clear/draw suppression |
 | `nvn_viewport` | Viewport origin, `SetViewportSwizzles` NEGATIVE_Y, line width and the queue-origin-aware front face |
 | `nvn_drawtex` | `nvnCommandBufferDrawTexture`: source/destination regions, scissor, mirrored destination and the channel mask |
+| `nvn_readback` | CPU texture reads of 3D slices, array layers and block-compressed blocks, and block-aware copies |
+| `nvn_view_swizzle` | Texture view/builder channel swizzles, an sRGB-format twin and RGBX's alpha-1 read |
 | `nvn_copy` | Buffer/texture and texture/texture copies with byte-exact round trip; masked and rectangular texture clears |
 | `nvn_compute` | Compute program, SSBO binding, dispatch and guest-memory copy-back |
 | `nvn_compute_image` | Compute storage-image write and readback |

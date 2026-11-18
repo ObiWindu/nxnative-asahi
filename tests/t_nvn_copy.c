@@ -86,6 +86,29 @@ int main(void) {
         mirror_y_match &= memcmp(out + (y * 8 + x) * 4, in + ((7 - y) * 8 + x) * 4, 4) == 0;
     CHECK(mirror_y_match, "texture copy mirror-Y reverses row order");
 
+    // An in-place copy whose regions overlap (a scroll) must read the whole
+    // source before it writes the destination. Vulkan copy commands forbid
+    // overlapping regions, so the replay snapshots the source.
+    NVNcopyRegion scroll_src = {0, 0, 0, 6, 8, 1}, scroll_dst = {2, 0, 0, 6, 8, 1};
+    uint8_t *scroll_out = storage + 0xb000;
+    NVNcommandBuffer cb_scroll;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_scroll, &dev) == 1, "in-place copy command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_scroll, &pool, 0x1d000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_scroll);
+    NVNF(nvnCommandBufferCopyTextureToTexture)(&cb_scroll, &a, NULL, &scroll_src,
+                                               &a, NULL, &scroll_dst, 0);
+    NVNF(nvnCommandBufferCopyTextureToBuffer)(&cb_scroll, &a, NULL, &r,
+                                              (NVNbufferAddress)(uintptr_t)scroll_out, 0);
+    NVNcommandHandle hscroll = NVNF(nvnCommandBufferEndRecording)(&cb_scroll);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hscroll);
+    NVNF(nvnQueueFinish)(&q);
+    int scroll_ok = 1;
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+        const uint8_t *want = (x >= 2 && x < 8) ? in + (y * 8 + (x - 2)) * 4 : in + (y * 8 + x) * 4;
+        scroll_ok &= memcmp(scroll_out + (y * 8 + x) * 4, want, 4) == 0;
+    }
+    CHECK(scroll_ok, "an in-place overlapping copy reads its source before writing");
+
     // A texture clear over a subregion must preserve the pixels on either
     // side. The prior copy left b as a known vertical mirror of a.
     NVNcopyRegion clear_region = {2, 3, 0, 3, 2, 1};

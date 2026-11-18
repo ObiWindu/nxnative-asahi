@@ -145,6 +145,16 @@ int main(void) {
     const uint8_t *mid = px + (32 * 64 + 32) * 4;
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
     CHECK(mid[0] > 200 && mid[1] < 40 && mid[2] < 40, "the draw reached the target centre: %u %u %u", mid[0], mid[1], mid[2]);
+
+    // The guest's own CPU read of the multisampled colour target resolves it
+    // first: the draw's red in the middle, the clear's blue at the corner.
+    uint8_t mpx[64 * 64 * 4];
+    NVNF(nvnTextureReadTexels)(&tex, NULL, &all, mpx);
+    const uint8_t *mcorner = mpx;
+    const uint8_t *mmid = mpx + (32 * 64 + 32) * 4;
+    CHECK(mcorner[2] > 200 && mcorner[0] < 40 && mmid[0] > 200 && mmid[2] < 40,
+          "nvnTextureReadTexels resolves the 4x MSAA target: corner %u %u %u centre %u %u %u",
+          mcorner[0], mcorner[1], mcorner[2], mmid[0], mmid[1], mmid[2]);
     extern uint64_t mtl_present(const void *, double, const int *, uint64_t *);
     uint64_t copy = 0;
     uint64_t ticket = mtl_present(&tex, 1.0 / 60.0, NULL, &copy);

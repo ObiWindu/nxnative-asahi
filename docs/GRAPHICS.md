@@ -81,11 +81,16 @@ Vulkan work:
   handle's sampler into a destination pixel rectangle of each colour target,
   drawn as the same kind of full-target triangle with the target's channel mask
   and the destination clamped by the scissor (the built-in `drawtex` shaders);
-- buffer→texture, texture→texture and texture→buffer copies;
+- buffer→texture, texture→texture and texture→buffer copies, including
+  block-compressed formats (transfers are counted in whole blocks);
+- CPU texture reads (`nvnTextureReadTexels`) of 2D, array, 3D and
+  block-compressed textures, with multisampled colour targets resolved first;
 - buffer textures (`samplerBuffer`, `UNIFORM_TEXEL_BUFFER`);
 - 2D array, cube and 3D textures with every layer/slice of every level uploaded;
 - multisample render targets and resolve through `vkCmdResolveImage`;
-- textures, samplers, texture/sampler ID pools, views and CPU/GPU ownership;
+- textures, samplers, texture/sampler ID pools, views (levels, layers, sRGB
+  twins and channel swizzles as the sampled view's component mapping) and
+  CPU/GPU ownership;
 - guest-memory upload (linear rows or a CPU deswizzle) and GPU readback;
 - SPIR-V shader modules from `<key>_b.spv` and the reflection JSON
   `<key>_b.json`, with an automatic descriptor set layout;

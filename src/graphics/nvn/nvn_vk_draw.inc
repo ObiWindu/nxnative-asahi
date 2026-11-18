@@ -85,9 +85,19 @@ static VkFormat vkfmt(int f) {
     case NVN_FORMAT_RGBA8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
     case NVN_FORMAT_RGB10A2: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case NVN_FORMAT_R11G11B10F: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    // The packed 16-bit family, by its NVN name order: RGB* puts red in the high
+    // bits (as the Metal table's r/b swap says), BGR* puts blue there. The
+    // alpha-less members read alpha as 1 (nvn_fmt_no_alpha).
+    case NVN_FORMAT_RGB5: return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
     case NVN_FORMAT_RGB565: return VK_FORMAT_R5G6B5_UNORM_PACK16;
     case NVN_FORMAT_RGB5A1: return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
     case NVN_FORMAT_RGBA4: return VK_FORMAT_R4G4B4A4_UNORM_PACK16;
+    case NVN_FORMAT_BGR565: return VK_FORMAT_B5G6R5_UNORM_PACK16;
+    case NVN_FORMAT_BGR5: return VK_FORMAT_B5G5R5A1_UNORM_PACK16;
+    case NVN_FORMAT_BGR5A1: return VK_FORMAT_B5G5R5A1_UNORM_PACK16;
+    case NVN_FORMAT_A1BGR5: return VK_FORMAT_A1B5G5R5_UNORM_PACK16;
+    case NVN_FORMAT_BGRX8: return VK_FORMAT_B8G8R8A8_UNORM;
+    case NVN_FORMAT_BGRX8_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
     case NVN_FORMAT_DEPTH16: return VK_FORMAT_D16_UNORM;
     case NVN_FORMAT_DEPTH24: return VK_FORMAT_X8_D24_UNORM_PACK32;
     case NVN_FORMAT_DEPTH32F: return VK_FORMAT_D32_SFLOAT;
@@ -125,7 +135,31 @@ static VkFormat vkfmt(int f) {
     case NVN_FORMAT_RGBA_ASTC_12x10: return VK_FORMAT_ASTC_12x10_UNORM_BLOCK;
     case NVN_FORMAT_RGBA_ASTC_12x12: return VK_FORMAT_ASTC_12x12_UNORM_BLOCK;
     case NVN_FORMAT_RGBA_ASTC_4x4_SRGB: return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_5x4_SRGB: return VK_FORMAT_ASTC_5x4_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_5x5_SRGB: return VK_FORMAT_ASTC_5x5_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_6x5_SRGB: return VK_FORMAT_ASTC_6x5_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_6x6_SRGB: return VK_FORMAT_ASTC_6x6_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_8x5_SRGB: return VK_FORMAT_ASTC_8x5_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_8x6_SRGB: return VK_FORMAT_ASTC_8x6_SRGB_BLOCK;
     case NVN_FORMAT_RGBA_ASTC_8x8_SRGB: return VK_FORMAT_ASTC_8x8_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_10x5_SRGB: return VK_FORMAT_ASTC_10x5_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_10x6_SRGB: return VK_FORMAT_ASTC_10x6_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_10x8_SRGB: return VK_FORMAT_ASTC_10x8_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_10x10_SRGB: return VK_FORMAT_ASTC_10x10_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_12x10_SRGB: return VK_FORMAT_ASTC_12x10_SRGB_BLOCK;
+    case NVN_FORMAT_RGBA_ASTC_12x12_SRGB: return VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
+    // RGBX: Vulkan has no X component; the RGBA format of the same size holds
+    // the same texels and a sampled view reads alpha as 1 (nvn_fmt_no_alpha).
+    case NVN_FORMAT_RGBX8: return VK_FORMAT_R8G8B8A8_UNORM;
+    case NVN_FORMAT_RGBX8SN: return VK_FORMAT_R8G8B8A8_SNORM;
+    case NVN_FORMAT_RGBX8UI: return VK_FORMAT_R8G8B8A8_UINT;
+    case NVN_FORMAT_RGBX8I: return VK_FORMAT_R8G8B8A8_SINT;
+    case NVN_FORMAT_RGBX8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+    case NVN_FORMAT_RGBX16F: return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case NVN_FORMAT_RGBX16: return VK_FORMAT_R16G16B16A16_UNORM;
+    case NVN_FORMAT_RGBX16SN: return VK_FORMAT_R16G16B16A16_SNORM;
+    case NVN_FORMAT_RGBX32F: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case NVN_FORMAT_RGB9E5F: return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
     default: return VK_FORMAT_UNDEFINED;
     }
 }
@@ -1026,8 +1060,8 @@ static void drv_fill(uint8_t *d, int bank, int st, const char *shader_key) {
 // Views: NVN texture views can change the format (an sRGB twin of a linear
 // texture) and pick a level/layer range. Vulkan requires a separate image view
 // for that; the images are created mutable, as Vulkan requires for twin views.
-typedef struct { uint64_t serial; int fmt, base, levels, minl, nlayers; VkImageView view; } tex_view_ent;
-static tex_view_ent g_tviews[256]; static int g_ntv;
+typedef struct { uint64_t serial; int fmt, base, levels, minl, nlayers; uint8_t has_swz, swz[4], one_alpha; VkImageView view; } tex_view_ent;
+static tex_view_ent g_tviews[1024]; static int g_ntv;
 
 static VkImageAspectFlags nvn_view_aspect(int fmt) {
     if (fmt == NVN_FORMAT_DEPTH16 || fmt == NVN_FORMAT_DEPTH24 || fmt == NVN_FORMAT_DEPTH32F) return VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -1035,28 +1069,78 @@ static VkImageAspectFlags nvn_view_aspect(int fmt) {
     if (fmt == NVN_FORMAT_STENCIL8) return VK_IMAGE_ASPECT_STENCIL_BIT;
     return VK_IMAGE_ASPECT_COLOR_BIT;
 }
+// The channel swizzle a sampled view reads through: the view's own, else the
+// texture builder's, as on Metal (treg_swizzle). NVN names the source channel
+// each output component takes (ZERO/ONE/R/G/B/A).
+static int nvn_view_swz(const tex_ent *e, const view_t *v, uint8_t out[4]) {
+    if (v && v->set_swizzle) { memcpy(out, v->swz, 4); return 1; }
+    if (e->t.set_swz) { for (int c = 0; c < 4; c++) out[c] = (uint8_t)(e->t.swz >> (3 * c) & 7); return 1; }
+    return 0;
+}
+static VkComponentSwizzle nvn_swz_vk(uint8_t s) {
+    switch (s) {
+    case NVN_TEXTURE_SWIZZLE_ZERO: return VK_COMPONENT_SWIZZLE_ZERO;
+    case NVN_TEXTURE_SWIZZLE_ONE: return VK_COMPONENT_SWIZZLE_ONE;
+    case NVN_TEXTURE_SWIZZLE_R: return VK_COMPONENT_SWIZZLE_R;
+    case NVN_TEXTURE_SWIZZLE_G: return VK_COMPONENT_SWIZZLE_G;
+    case NVN_TEXTURE_SWIZZLE_B: return VK_COMPONENT_SWIZZLE_B;
+    case NVN_TEXTURE_SWIZZLE_A: return VK_COMPONENT_SWIZZLE_A;
+    default: return VK_COMPONENT_SWIZZLE_IDENTITY;
+    }
+}
 // A view's format/levels/layers as a cached VkImageView. Without a view, the
-// texture's base view. Used by sampled descriptors and render targets.
-static VkImageView cached_view(tex_ent *e, const view_t *v, VkFormat *fmt_out) {
-    if (!v || (!v->set_format && !v->set_levels && !v->set_layers)) { if (fmt_out) *fmt_out = e->fmt; return e->view; }
-    int fmt = v->set_format ? v->format : 0, base = v->set_levels ? v->base_level : 0;
-    int levels = v->set_levels ? v->nlevels : 1;
-    int minl = v->set_layers ? v->min_layer : 0, nlayers = v->set_layers ? v->nlayers : 1;
+// texture's base view. A sampled view also carries its channel swizzle: Vulkan
+// allows a component mapping on sampled image views only, so render targets and
+// storage images pass sampled = 0 and keep the identity.
+static VkImageView cached_view(tex_ent *e, const view_t *v, VkFormat *fmt_out, int sampled) {
+    uint8_t swz[4] = {0};
+    int has_swz = sampled && nvn_view_swz(e, v, swz);
+    if (has_swz && swz[0] == NVN_TEXTURE_SWIZZLE_R && swz[1] == NVN_TEXTURE_SWIZZLE_G &&
+        swz[2] == NVN_TEXTURE_SWIZZLE_B && swz[3] == NVN_TEXTURE_SWIZZLE_A) has_swz = 0;
+    int plain = !v || (!v->set_format && !v->set_levels && !v->set_layers);
+    int fmt = v && v->set_format ? v->format : 0, base = v && v->set_levels ? v->base_level : 0;
+    int levels = v && v->set_levels ? v->nlevels : 1;
+    int minl = v && v->set_layers ? v->min_layer : 0, nlayers = v && v->set_layers ? v->nlayers : 1;
     VkFormat vf = fmt ? vkfmt(fmt) : e->fmt;
-    if (vf == VK_FORMAT_UNDEFINED) { if (fmt_out) *fmt_out = e->fmt; return e->view; }
+    if (vf == VK_FORMAT_UNDEFINED) vf = e->fmt;
     if (fmt_out) *fmt_out = vf;
+    // A format with no alpha channel (an RGBX texture, read through the RGBA
+    // format of the same size) reads alpha as 1. An explicit swizzle wins.
+    int one_alpha = sampled && !has_swz && nvn_fmt_no_alpha(fmt ? fmt : e->t.d.format);
+    if (plain && !has_swz && !one_alpha) return e->view;
     for (int i = 0; i < g_ntv; i++) {
         tex_view_ent *x = &g_tviews[i];
-        if (x->serial == e->serial && x->fmt == fmt && x->base == base && x->levels == levels && x->minl == minl && x->nlayers == nlayers) return x->view;
+        if (x->serial == e->serial && x->fmt == fmt && x->base == base && x->levels == levels &&
+            x->minl == minl && x->nlayers == nlayers && x->has_swz == (uint8_t)has_swz &&
+            x->one_alpha == (uint8_t)one_alpha &&
+            (!has_swz || !memcmp(x->swz, swz, 4))) return x->view;
     }
-    if (g_ntv >= (int)(sizeof g_tviews / sizeof *g_tviews)) return e->view;
+    if (g_ntv >= (int)(sizeof g_tviews / sizeof *g_tviews)) {
+        static int warned;
+        if (!warned++) LOG("[RED] [nvn/vk] texture view cache is full; a view with its own format, levels, layers or swizzle uses the base view");
+        return e->view;
+    }
     VkImageViewCreateInfo ci = {0};
     ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    ci.image = e->img; ci.viewType = VK_IMAGE_VIEW_TYPE_2D; ci.format = vf;
-    ci.subresourceRange = (VkImageSubresourceRange){nvn_view_aspect(fmt ? fmt : e->t.d.format), (uint32_t)base, (uint32_t)levels, (uint32_t)minl, (uint32_t)nlayers};
+    ci.image = e->img; ci.format = vf;
+    if (plain) {
+        // A swizzle on the texture's own view: the whole texture, as e->view.
+        ci.viewType = e->view_type;
+        ci.subresourceRange = tex_subresources(e);
+    } else {
+        ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ci.subresourceRange = (VkImageSubresourceRange){nvn_view_aspect(fmt ? fmt : e->t.d.format),
+            (uint32_t)base, (uint32_t)levels, (uint32_t)minl, (uint32_t)nlayers};
+    }
+    if (has_swz) {
+        ci.components.r = nvn_swz_vk(swz[0]); ci.components.g = nvn_swz_vk(swz[1]);
+        ci.components.b = nvn_swz_vk(swz[2]); ci.components.a = nvn_swz_vk(swz[3]);
+    } else if (one_alpha) ci.components.a = VK_COMPONENT_SWIZZLE_ONE;
     VkImageView iv = VK_NULL_HANDLE;
     if (vkCreateImageView(g_vk.device, &ci, NULL, &iv) != VK_SUCCESS) return e->view;
-    g_tviews[g_ntv++] = (tex_view_ent){e->serial, fmt, base, levels, minl, nlayers, iv};
+    tex_view_ent *x = &g_tviews[g_ntv++];
+    *x = (tex_view_ent){e->serial, fmt, base, levels, minl, nlayers, (uint8_t)has_swz, {0}, (uint8_t)one_alpha, iv};
+    if (has_swz) memcpy(x->swz, swz, 4);
     return iv;
 }
 
@@ -1068,7 +1152,7 @@ static tex_ent *texid_image(int id, VkImageView *view) {
     tex_ent *e = tex_ensure(&t->t);
     if (!e) return NULL;
     if (!e->gpu_dirty && upload_guest_texture(&t->t, e) != 0) return NULL;
-    *view = t->has_view ? cached_view(e, &t->v, NULL) : e->view;
+    *view = cached_view(e, t->has_view ? &t->v : NULL, NULL, 1);
     return e;
 }
 
@@ -1346,15 +1430,26 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
         if (!g_rt.color[i]) { ncolor = i; break; }
         ce[i] = tex_ensure(g_rt.color[i]);
         if (!ce[i]) return;
+        if (!ce[i]->can_attach) {
+            static int warned;
+            if (!warned++) LOG("[RED] [nvn/vk] colour target format %d cannot be a render target on this device; the draw is dropped",
+                               g_rt.color[i]->d.format);
+            return;
+        }
         if (i == 0) { dww = g_rt.color[i]->d.width ? g_rt.color[i]->d.width : 1; dhh = g_rt.color[i]->d.height ? g_rt.color[i]->d.height : 1; }
         color[i] = ce[i]->fmt;
-        if (g_rt.has_cview[i]) cached_view(ce[i], &g_rt.cview[i], &color[i]);
+        if (g_rt.has_cview[i]) cached_view(ce[i], &g_rt.cview[i], &color[i], 0);
     }
     if (!ncolor && g_rt.depth) { dww = g_rt.depth->d.width ? g_rt.depth->d.width : 1; dhh = g_rt.depth->d.height ? g_rt.depth->d.height : 1; }
     if (!ncolor && !g_rt.depth) return;
     uint32_t samples = ncolor ? ce[0]->samples : 1;
     tex_ent *de = NULL; VkFormat depth_fmt = VK_FORMAT_UNDEFINED; VkImageView depth_view = VK_NULL_HANDLE;
-    if (g_rt.depth) { de = tex_ensure(g_rt.depth); if (de) { depth_fmt = de->fmt; depth_view = g_rt.has_dview ? cached_view(de, &g_rt.dview, &depth_fmt) : de->view; if (!ncolor) samples = de->samples; } }
+    if (g_rt.depth) { de = tex_ensure(g_rt.depth); if (de && !de->can_attach) {
+        static int warned;
+        if (!warned++) LOG("[RED] [nvn/vk] depth target format %d cannot be a render target on this device; the draw is dropped",
+                           g_rt.depth->d.format);
+        return;
+    } else if (de) { depth_fmt = de->fmt; depth_view = g_rt.has_dview ? cached_view(de, &g_rt.dview, &depth_fmt, 0) : de->view; if (!ncolor) samples = de->samples; } }
     VkRenderPass rp = rp_get(ncolor, color, depth_fmt, samples);
     if (!rp) return;
     int prim = da ? da->prim : di->prim;
@@ -1399,7 +1494,7 @@ static void nvkd_draw_common(const prog_t *progp, int indexed, const p_draw *da,
     }
 
     VkImageView views[9]; uint32_t nv = 0;
-    for (int i = 0; i < ncolor; i++) views[nv++] = g_rt.has_cview[i] ? cached_view(ce[i], &g_rt.cview[i], NULL) : ce[i]->view;
+    for (int i = 0; i < ncolor; i++) views[nv++] = g_rt.has_cview[i] ? cached_view(ce[i], &g_rt.cview[i], NULL, 0) : ce[i]->view;
     if (de) views[nv++] = depth_view;
     VkFramebufferCreateInfo fci = {0};
     fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -2143,12 +2238,25 @@ static void nvkd_dispatch(const p_dispatch *d) {
 // ---------------------------------------------------------------------------
 // Texture copies (buffer→texture, texture→buffer, texture→texture)
 // ---------------------------------------------------------------------------
-static int copy_format(const tex_t *t, VkFormat *vf, size_t *bpp) {
+// The texture's Vulkan format with its texel block size and extent. A 1x1
+// block is an ordinary texel; a larger one is a block-compressed format, whose
+// transfers are counted in whole blocks.
+static int copy_format_blocks(const tex_t *t, VkFormat *vf, size_t *bpp,
+                              uint32_t *block_w, uint32_t *block_h) {
     int bw = 0, bh = 0, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
-    if (bpb <= 0 || bw != 1 || bh != 1) return -1;
+    if (bpb <= 0 || bw <= 0 || bh <= 0) return -1;
     *vf = vkfmt(t->d.format);
     if (*vf == VK_FORMAT_UNDEFINED) return -1;
     *bpp = (size_t)bpb;
+    if (block_w) *block_w = (uint32_t)bw;
+    if (block_h) *block_h = (uint32_t)bh;
+    return 0;
+}
+// Only the blit path needs plain texels: Vulkan blits cannot express a
+// block-compressed format change, scaling or mirroring here.
+static int copy_format(const tex_t *t, VkFormat *vf, size_t *bpp) {
+    uint32_t bw = 0, bh = 0;
+    if (copy_format_blocks(t, vf, bpp, &bw, &bh) != 0 || bw != 1 || bh != 1) return -1;
     return 0;
 }
 // Vulkan blits convert normalized / floating color formats through float and
@@ -2188,8 +2296,8 @@ static void copy_transition(VkCommandBuffer cb, tex_ent *e, VkImageLayout to, Vk
 typedef struct {
     VkImageSubresourceLayers subresource;
     VkOffset3D offset;
-    VkExtent3D extent;
-    uint32_t slices;
+    VkExtent3D extent;            // in texels
+    uint32_t slices, rows;        // stage rows: texel rows, or blocks of a compressed format
     size_t row_bytes, tight_image_bytes, staging_bytes;
 } nvn_copy_region;
 
@@ -2239,16 +2347,24 @@ static int nvn_copy_region_make(const tex_t *t, tex_ent *e, const view_t *view,
             t->d.target != NVN_TEXTURE_TARGET_CUBEMAP &&
             t->d.target != NVN_TEXTURE_TARGET_CUBEMAP_ARRAY && (z || depth != 1)) return -1;
     }
-    if ((size_t)w > SIZE_MAX / bpp) return -1;
-    size_t row_bytes = (size_t)w * bpp;
-    if ((size_t)h > SIZE_MAX / row_bytes) return -1;
-    size_t tight_image = row_bytes * h;
+    int fbw = 0, fbh = 0;
+    int fbpb = nvn_fmt_bpb(t->d.format, &fbw, &fbh);
+    if (fbpb <= 0 || fbw <= 0 || fbh <= 0 || (size_t)fbpb != bpp) return -1;
+    // A compressed copy moves whole blocks: its rows are block rows and every
+    // block that the region touches is copied.
+    if ((fbw > 1 || fbh > 1) && ((uint32_t)fbw > w || (uint32_t)fbh > h)) return -1;
+    uint32_t blocks_x = (w + (uint32_t)fbw - 1) / (uint32_t)fbw;
+    uint32_t rows = (h + (uint32_t)fbh - 1) / (uint32_t)fbh;
+    if (blocks_x > SIZE_MAX / bpp) return -1;
+    size_t row_bytes = (size_t)blocks_x * bpp;
+    if ((size_t)rows > SIZE_MAX / row_bytes) return -1;
+    size_t tight_image = row_bytes * (size_t)rows;
     uint32_t slices = is3d ? image_depth : layer_count;
     if ((size_t)slices > SIZE_MAX / tight_image) return -1;
     *out = (nvn_copy_region){
         .subresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, first_layer, layer_count},
         .offset = {(int32_t)x, (int32_t)y, is3d ? (int32_t)z : 0},
-        .extent = {w, h, image_depth}, .slices = slices,
+        .extent = {w, h, image_depth}, .slices = slices, .rows = rows,
         .row_bytes = row_bytes, .tight_image_bytes = tight_image,
         .staging_bytes = tight_image * (size_t)slices,
     };
@@ -2259,8 +2375,8 @@ static int nvn_copy_strides_get(const p_copy_strides *cs, const nvn_copy_region 
                                 size_t *row_pitch, size_t *image_pitch) {
     if (cs && (cs->row < 0 || cs->image < 0)) return -1;
     *row_pitch = cs && cs->row > 0 ? (size_t)cs->row : r->row_bytes;
-    if (*row_pitch < r->row_bytes || *row_pitch > SIZE_MAX / r->extent.height) return -1;
-    size_t minimum_image = *row_pitch * r->extent.height;
+    if (!r->rows || *row_pitch < r->row_bytes || *row_pitch > SIZE_MAX / r->rows) return -1;
+    size_t minimum_image = *row_pitch * r->rows;
     *image_pitch = cs && cs->image > 0 ? (size_t)cs->image : minimum_image;
     if (*image_pitch < minimum_image) return -1;
     return 0;
@@ -2268,16 +2384,16 @@ static int nvn_copy_strides_get(const p_copy_strides *cs, const nvn_copy_region 
 
 static int nvn_copy_staging_span(const nvn_copy_region *r, size_t row_pitch,
                                  size_t image_pitch, size_t *span) {
-    if (!r || !span || !r->slices || !r->extent.height ||
-        row_pitch < r->row_bytes || row_pitch > SIZE_MAX / r->extent.height)
+    if (!r || !span || !r->slices || !r->rows ||
+        row_pitch < r->row_bytes || row_pitch > SIZE_MAX / r->rows)
         return -1;
-    size_t minimum_image = row_pitch * (size_t)r->extent.height;
+    size_t minimum_image = row_pitch * (size_t)r->rows;
     if (image_pitch < minimum_image) return -1;
     size_t last_image = 0, last_row = 0;
     if ((size_t)(r->slices - 1) > SIZE_MAX / image_pitch ||
-        (size_t)(r->extent.height - 1) > SIZE_MAX / row_pitch) return -1;
+        (size_t)(r->rows - 1) > SIZE_MAX / row_pitch) return -1;
     last_image = (size_t)(r->slices - 1) * image_pitch;
-    last_row = (size_t)(r->extent.height - 1) * row_pitch;
+    last_row = (size_t)(r->rows - 1) * row_pitch;
     if (last_image > SIZE_MAX - last_row || last_image + last_row > SIZE_MAX - r->row_bytes) return -1;
     *span = last_image + last_row + r->row_bytes;
     return 0;
@@ -2286,7 +2402,7 @@ static int nvn_copy_staging_span(const nvn_copy_region *r, size_t row_pitch,
 static void copy_b2t(const p_copy_b2t *c, uint32_t rec_size) {
     if (!c || !c->tex || !c->src) return;
     size_t bpp = 0; VkFormat vf = VK_FORMAT_UNDEFINED;
-    if (copy_format(c->tex, &vf, &bpp) != 0) { warn_once(&g_draw_warned, "NVN buffer-to-texture copy of a block-compressed format"); return; }
+    if (copy_format_blocks(c->tex, &vf, &bpp, NULL, NULL) != 0) { warn_once(&g_draw_warned, "NVN buffer-to-texture copy of an unmapped format"); return; }
     tex_ent *e = tex_ensure(c->tex);
     if (!e) return;
     nvn_copy_region region;
@@ -2312,7 +2428,7 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t rec_size) {
     }
     hbuf staging;
     if (hbuf_make(&staging, NULL, region.staging_bytes) != 0) return;
-    for (uint32_t z = 0; z < region.slices; z++) for (uint32_t y = 0; y < region.extent.height; y++)
+    for (uint32_t z = 0; z < region.slices; z++) for (uint32_t y = 0; y < region.rows; y++)
         memcpy((uint8_t *)staging.map + (size_t)z * region.tight_image_bytes + (size_t)y * region.row_bytes,
                (const uint8_t *)(uintptr_t)c->src + (size_t)z * image_pitch + (size_t)y * row_pitch,
                region.row_bytes);
@@ -2550,6 +2666,12 @@ static void clear_color_record(const p_clear_color *c) {
         nx_vk_oneshot_end(&g_vk, cb);
         LOG("[RED] [nvn/vk] scissored color clear of a 3D texture requires image2DViewOf3D"); return;
     }
+    if (!e->can_attach) {
+        static int warned;
+        if (!warned++) LOG("[RED] [nvn/vk] colour clear target format %d cannot be a render target on this device; the clear is dropped", t->d.format);
+        nx_vk_oneshot_end(&g_vk, cb);
+        return;
+    }
     VkFormat fmt = view && view->set_format ? vkfmt(view->format) : e->fmt;
     if (fmt == VK_FORMAT_UNDEFINED) fmt = e->fmt;
     VkRenderPass rp = rp_get(1, &fmt, VK_FORMAT_UNDEFINED, e->samples);
@@ -2616,7 +2738,7 @@ static void clear_color_record(const p_clear_color *c) {
 static void copy_t2b(const p_copy_b2t *c, uint32_t rec_size) {
     if (!c || !c->tex || !c->src) return;
     size_t bpp = 0; VkFormat vf = VK_FORMAT_UNDEFINED;
-    if (copy_format(c->tex, &vf, &bpp) != 0) { warn_once(&g_draw_warned, "NVN texture-to-buffer copy of a block-compressed format"); return; }
+    if (copy_format_blocks(c->tex, &vf, &bpp, NULL, NULL) != 0) { warn_once(&g_draw_warned, "NVN texture-to-buffer copy of an unmapped format"); return; }
     tex_ent *e = tex_ensure(c->tex);
     if (!e) return;
     if (!e->gpu_dirty && upload_guest_texture(c->tex, e) != 0) return;
@@ -2658,7 +2780,7 @@ static void copy_t2b(const p_copy_b2t *c, uint32_t rec_size) {
     copy_transition(cb, e, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT);
     nx_vk_oneshot_end(&g_vk, cb);
     if (staging.map) {
-        for (uint32_t z = 0; z < region.slices; z++) for (uint32_t y = 0; y < region.extent.height; y++)
+        for (uint32_t z = 0; z < region.slices; z++) for (uint32_t y = 0; y < region.rows; y++)
             memcpy((uint8_t *)(uintptr_t)c->src + (size_t)z * image_pitch + (size_t)y * row_pitch,
                    (uint8_t *)staging.map + (size_t)z * region.tight_image_bytes + (size_t)y * region.row_bytes,
                    region.row_bytes);
@@ -2668,8 +2790,14 @@ static void copy_t2b(const p_copy_b2t *c, uint32_t rec_size) {
 static void copy_t2t(const p_copy_t2t *c) {
     if (!c || !c->src || !c->dst) return;
     size_t sbpp = 0, dbpp = 0; VkFormat sf = VK_FORMAT_UNDEFINED, df = VK_FORMAT_UNDEFINED;
-    if (copy_format(c->src, &sf, &sbpp) != 0 || copy_format(c->dst, &df, &dbpp) != 0) {
-        warn_once(&g_draw_warned, "NVN texture-to-texture copy of block-compressed or unmapped formats"); return;
+    uint32_t sbw = 0, sbh = 0, dbw = 0, dbh = 0;
+    if (copy_format_blocks(c->src, &sf, &sbpp, &sbw, &sbh) != 0 ||
+        copy_format_blocks(c->dst, &df, &dbpp, &dbw, &dbh) != 0) {
+        warn_once(&g_draw_warned, "NVN texture-to-texture copy of unmapped formats"); return;
+    }
+    int compressed = sbw > 1 || sbh > 1;
+    if (compressed && (sf != df || sbw != dbw || sbh != dbh)) {
+        warn_once(&g_draw_warned, "NVN texture-to-texture copy between different block-compressed formats"); return;
     }
     int format_convert = sf != df;
     int src_class = nvn_copy_numeric_class(c->src->d.format);
@@ -2681,7 +2809,10 @@ static void copy_t2t(const p_copy_t2t *c) {
     tex_ent *s = tex_ensure(c->src), *d = tex_ensure(c->dst);
     if (!s || !d) return;
     int resolve = (c->flags & DM_COPY_RESOLVE) != 0;
-    if (s == d) { warn_once(&g_draw_warned, "NVN in-place texture copy"); return; }
+    // NVN allows a copy whose regions overlap, including one texture onto
+    // itself (a scroll). Vulkan copy commands forbid that, so it goes through
+    // the staging snapshot below.
+    int in_place = s == d;
     if (resolve ? (s->samples == 1 || d->samples != 1) : (s->samples != 1 || d->samples != 1)) {
         warn_once(&g_draw_warned, "NVN copy with unsupported multisample counts"); return;
     }
@@ -2708,8 +2839,18 @@ static void copy_t2t(const p_copy_t2t *c) {
         (!resolve && (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT));
     int mirror_array_z = (c->flags & NVN_COPY_FLAGS_MIRROR_Z_BIT) &&
         c->src->d.target != NVN_TEXTURE_TARGET_3D;
+    if (compressed && blit) {
+        LOG("[RED] [nvn/vk] block-compressed texture copy cannot scale, mirror or change format"); return;
+    }
+    if (compressed && (sr.extent.width % sbw || sr.extent.height % sbh || sr.offset.x % (int32_t)sbw ||
+                       sr.offset.y % (int32_t)sbh || dr.offset.x % (int32_t)dbw || dr.offset.y % (int32_t)dbh)) {
+        LOG("[RED] [nvn/vk] block-compressed texture copy region is not block-aligned"); return;
+    }
     if (resolve && blit) {
         LOG("[RED] [nvn/vk] multisample resolve cannot scale or mirror"); return;
+    }
+    if (in_place && (blit || resolve)) {
+        LOG("[RED] [nvn/vk] in-place texture copy cannot scale, mirror, convert or resolve"); return;
     }
     if (blit && !resolve) {
         VkFormatProperties src_props, dst_props;
@@ -2724,6 +2865,39 @@ static void copy_t2t(const p_copy_t2t *c) {
     }
     if (!s->gpu_dirty && upload_guest_texture(c->src, s) != 0) return;
     if (!d->gpu_dirty && upload_guest_texture(c->dst, d) != 0) return;
+    if (in_place) {
+        // Snapshot the source region into a staging buffer, then write it to
+        // the destination region: the guest's overlap semantics (the whole
+        // source is read before the destination is written).
+        if (sr.row_bytes > SIZE_MAX / sr.rows || sr.row_bytes * sr.rows > SIZE_MAX / sr.slices) return;
+        size_t bytes = sr.row_bytes * sr.rows * sr.slices;
+        VkBuffer snap = VK_NULL_HANDLE; VkDeviceMemory smem = VK_NULL_HANDLE;
+        if (nx_vk_create_buffer(&g_vk, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &snap, &smem, NULL) != 0) {
+            LOG("[RED] [nvn/vk] in-place texture copy has no staging buffer"); return;
+        }
+        VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
+        if (!cb) { nx_vk_destroy_buffer(&g_vk, snap, smem); return; }
+        copy_transition(cb, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy out = {0};
+        out.imageSubresource = sr.subresource; out.imageOffset = sr.offset; out.imageExtent = sr.extent;
+        vkCmdCopyImageToBuffer(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, snap, 1, &out);
+        VkBufferMemoryBarrier bb = {0};
+        bb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bb.buffer = snap; bb.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1, &bb, 0, NULL);
+        copy_transition(cb, d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy in = {0};
+        in.imageSubresource = dr.subresource; in.imageOffset = dr.offset; in.imageExtent = dr.extent;
+        vkCmdCopyBufferToImage(cb, snap, d->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &in);
+        copy_transition(cb, d, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        nx_vk_oneshot_end(&g_vk, cb);
+        nx_vk_destroy_buffer(&g_vk, snap, smem);
+        d->gpu_dirty = 1;
+        return;
+    }
     VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
     if (!cb) return;
     copy_transition(cb, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -2837,6 +3011,12 @@ static void clear_tex_record(const p_clear_tex *c) {
         vkCmdClearColorImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
         copy_transition(cb, e, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     } else {
+        if (!e->can_attach) {
+            static int warned;
+            if (!warned++) LOG("[RED] [nvn/vk] texture clear target format %d cannot be a render target on this device", c->tex->d.format);
+            nx_vk_oneshot_end(&g_vk, cb);
+            return;
+        }
         const int is_3d = c->tex->d.target == NVN_TEXTURE_TARGET_3D;
         if (is_3d && !g_vk.caps.image_2d_view_of_3d) {
             nx_vk_oneshot_end(&g_vk, cb);
@@ -3064,6 +3244,7 @@ static void draw_tex_record(const p_draw_tex *c) {
         if (!wm) continue;
         tex_ent *dst = tex_ensure(g_rt.color[k]);
         if (!dst) continue;
+        if (!dst->can_attach) { static int warned; if (!warned++) LOG("[RED] [nvn/vk] DrawTexture target format %d cannot be a render target on this device", g_rt.color[k]->d.format); continue; }
         int fmtn = g_rt.color[k]->d.format;
         if (g_rt.has_cview[k] && g_rt.cview[k].set_format) fmtn = g_rt.cview[k].format;
         if (nvn_copy_numeric_class(fmtn) != 1 || dst->aspect != VK_IMAGE_ASPECT_COLOR_BIT) {
@@ -3087,7 +3268,7 @@ static void draw_tex_record(const p_draw_tex *c) {
         dv.set_layers = 1; dv.nlayers = 1;
         dv.min_layer = g_rt.has_cview[k] && g_rt.cview[k].set_layers ? g_rt.cview[k].min_layer : 0;
         if (g_rt.has_cview[k] && g_rt.cview[k].set_format) { dv.set_format = 1; dv.format = g_rt.cview[k].format; }
-        VkImageView dst_view = cached_view(dst, &dv, &fmt);
+        VkImageView dst_view = cached_view(dst, &dv, &fmt, 0);
         if (dst_view == VK_NULL_HANDLE) continue;
         VkRenderPass rp = rp_get(1, &fmt, VK_FORMAT_UNDEFINED, samples);
         if (!rp) { LOG("[RED] [nvn/vk] could not create a DrawTexture render pass"); continue; }

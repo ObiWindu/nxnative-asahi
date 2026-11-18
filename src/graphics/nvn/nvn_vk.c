@@ -46,6 +46,8 @@ typedef struct {
     VkImageViewType view_type;
     VkImageAspectFlags aspect;
     uint32_t layers, levels, samples;
+    int can_attach;                   // the format supports this image's attachment aspect
+    int can_sample;                   // the format supports sampled reads
     VkImageLayout layout;
     int gpu_dirty;                    // last write was ours; otherwise the guest memory is uploaded
 } tex_ent;
@@ -351,6 +353,30 @@ static void render_triangle(const tex_t *t) {
 
 static VkFormat vkfmt(int f);   // the full NVN format map lives with the draw/replay block
 
+// A format with no alpha channel reads alpha as 1, as NVN's X channel and the
+// Metal host's no-alpha formats do. Vulkan substitutes the RGBA format of the
+// same size, so a sampled view maps A to ONE (an attachment keeps the identity
+// view: a render target writes the guest's spare channel as it is).
+static int nvn_fmt_no_alpha(int f) {
+    switch (f) {
+    case NVN_FORMAT_RGBX8: case NVN_FORMAT_RGBX8SN: case NVN_FORMAT_RGBX8UI: case NVN_FORMAT_RGBX8I:
+    case NVN_FORMAT_RGBX8_SRGB:
+    case NVN_FORMAT_RGBX16F: case NVN_FORMAT_RGBX16: case NVN_FORMAT_RGBX16SN:
+    case NVN_FORMAT_RGBX16UI: case NVN_FORMAT_RGBX16I:
+    case NVN_FORMAT_RGBX32F: case NVN_FORMAT_RGBX32UI: case NVN_FORMAT_RGBX32I:
+    case NVN_FORMAT_RGB8: case NVN_FORMAT_RGB8SN: case NVN_FORMAT_RGB8UI: case NVN_FORMAT_RGB8I:
+    case NVN_FORMAT_RGB16F: case NVN_FORMAT_RGB16: case NVN_FORMAT_RGB16SN:
+    case NVN_FORMAT_RGB16UI: case NVN_FORMAT_RGB16I:
+    case NVN_FORMAT_RGB32F: case NVN_FORMAT_RGB32UI: case NVN_FORMAT_RGB32I:
+    case NVN_FORMAT_RGB5: case NVN_FORMAT_BGR5:
+    case NVN_FORMAT_BGRX8: case NVN_FORMAT_BGRX8_SRGB:
+    case NVN_FORMAT_RGB_DXT1: case NVN_FORMAT_RGB_DXT1_SRGB:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static tex_ent *tex_ensure(const tex_t *t) {
     if (!t || !t->serial) return NULL;
     tex_ent *e = tex_find(t->serial);
@@ -387,13 +413,42 @@ static tex_ent *tex_ensure(const tex_t *t) {
     int depth_fmt = t->d.format == NVN_FORMAT_DEPTH16 || t->d.format == NVN_FORMAT_DEPTH24 ||
                     t->d.format == NVN_FORMAT_DEPTH32F || t->d.format == NVN_FORMAT_DEPTH24_STENCIL8 ||
                     t->d.format == NVN_FORMAT_DEPTH32F_STENCIL8 || t->d.format == NVN_FORMAT_STENCIL8;
-    VkImageUsageFlags usage = depth_fmt ? (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT)
-                                        : (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+    // The image takes exactly the uses its format has. Asking for a use the
+    // format lacks (a colour attachment on a block-compressed or sampled-only
+    // format, a storage image on a packed one) makes image creation invalid,
+    // and a format with no sampled read cannot be replayed at all.
+    VkFormatProperties fp = {0};
+    vkGetPhysicalDeviceFormatProperties(g_vk.physical, e->fmt, &fp);
+    uint32_t f = fp.optimalTilingFeatures;
+    uint32_t need = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+                    (depth_fmt ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    if ((f & need) != need) {
+        static int warned[8]; static int nwarned;
+        int known = 0;
+        for (int i = 0; i < nwarned; i++) if (warned[i] == t->d.format) known = 1;
+        if (!known && nwarned < (int)(sizeof warned / sizeof *warned)) {
+            warned[nwarned++] = t->d.format;
+            LOG("[RED] [nvn/vk] texture format %d (Vulkan format %d) lacks the transfer and %s support this replay needs on this device; its textures are dropped",
+                t->d.format, (int)e->fmt, depth_fmt ? "depth/stencil attachment" : "sampled read");
+        }
+        return NULL;
+    }
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (f & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    int can_attach = 0;
+    if (depth_fmt) {
+        if (f & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) { usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT; can_attach = 1; }
+    } else if (f & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) { usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; can_attach = 1; }
+    if (f & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D;
     VkExtent3D extent = {w, h, is3d && t->d.depth ? t->d.depth : 1};
-    VkImageCreateFlags image_flags = is3d && g_vk.caps.api_version >= VK_API_VERSION_1_1 &&
-        g_vk.caps.image_2d_view_of_3d
-        ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0;
+    // NVN views reinterpret a texture's format (an sRGB twin of a linear
+    // texture, R32UI over the same storage, depth as R32F). Vulkan only allows
+    // a view whose format differs from the image's with MUTABLE_FORMAT, and a
+    // view registered after the image exists cannot add it then.
+    VkImageCreateFlags image_flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    if (is3d && g_vk.caps.api_version >= VK_API_VERSION_1_1 && g_vk.caps.image_2d_view_of_3d)
+        image_flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     if (nx_vk_create_image(&g_vk, is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, e->fmt, extent, levels, layers, samples, VK_IMAGE_TILING_OPTIMAL, image_flags,
                            usage, VK_IMAGE_LAYOUT_UNDEFINED, &e->img, &e->mem) != 0) return NULL;
     VkImageAspectFlags aspect = depth_fmt ? ((t->d.format == NVN_FORMAT_DEPTH24_STENCIL8 || t->d.format == NVN_FORMAT_DEPTH32F_STENCIL8 || t->d.format == NVN_FORMAT_STENCIL8) ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) : VK_IMAGE_ASPECT_DEPTH_BIT) : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -404,6 +459,8 @@ static tex_ent *tex_ensure(const tex_t *t) {
     vi.subresourceRange = (VkImageSubresourceRange){aspect, 0, levels, 0, layers};
     if (vkCreateImageView(g_vk.device, &vi, NULL, &e->view) != VK_SUCCESS) { nx_vk_destroy_image(&g_vk, e->img, e->mem); e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE; return NULL; }
     e->view_type = view_type; e->aspect = aspect; e->layers = layers; e->levels = levels; e->samples = samples;
+    e->can_attach = can_attach;
+    e->can_sample = (f & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
     e->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     e->gpu_dirty = 0;
     return e;
@@ -538,41 +595,154 @@ void mtl_reg_samp(int id, const samp_par *p) {
 void mtl_set_tex_pool_n(int n) { (void)n; }
 void mtl_set_samp_pool_n(int n) { (void)n; }
 
-// Read one 2D or 2D-array mip/layer back into the guest's linear buffer.
+// Read one mip (a region of it, one or more slices) back into the guest's
+// linear buffer in the texture's own format: a block-compressed format returns
+// its blocks and a multisampled colour target is resolved first. Region offsets
+// and sizes are in texels; the destination holds one block row per `row` bytes.
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
-    (void)img;
     if (!t || !dst) return;
     tex_ent *e = tex_ensure(t);
     if (!e) return;
-    if (e->samples > 1) { warn_once(&g_draw_warned, "readback of a multisampled texture"); return; }
-    if (level >= e->levels || layer0 >= e->layers || t->d.target == NVN_TEXTURE_TARGET_3D || t->d.target == NVN_TEXTURE_TARGET_1D) {
+    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D;
+    uint32_t lw = t->d.width >> level, lh = t->d.height >> level;
+    uint32_t lz = is3d ? (t->d.depth >> level) : 1;
+    if (!lw) lw = 1;
+    if (!lh) lh = 1;
+    if (!lz) lz = 1;
+    if (level >= e->levels || (!is3d && layer0 >= e->layers)) {
         warn_once(&g_draw_warned, "texture readback of an unsupported subresource");
         return;
     }
-    uint32_t w = t->d.width >> level, h = t->d.height >> level;
-    if (!w) w = 1;
-    if (!h) h = 1;
+    // A region's z offset and depth select slices of a 3D texture or layers of
+    // an array, as NVN's CPU read does.
+    uint32_t z0 = r && r->zoffset > 0 ? (uint32_t)r->zoffset : 0;
+    uint32_t nz = r && r->depth > 0 ? (uint32_t)r->depth : 1;
+    if (is3d) {
+        if (z0 >= lz) return;
+        if (nz > lz - z0) nz = lz - z0;
+    } else {
+        uint32_t first = layer0 + z0;
+        if (first >= e->layers) return;
+        if (nz > e->layers - first) nz = e->layers - first;
+    }
     int bw = 0, bh = 0;
     int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
-    if (bpb <= 0 || bw != 1 || bh != 1) { warn_once(&g_draw_warned, "texture readback of a block-compressed format"); return; }
-    if (w > SIZE_MAX / (size_t)bpb || (size_t)w * (size_t)bpb > SIZE_MAX / h) return;
-    size_t src_row = (size_t)w * (size_t)bpb, bytes = src_row * h;
+    if (bpb <= 0 || bw <= 0 || bh <= 0) {
+        warn_once(&g_draw_warned, "texture readback of a format without a block layout");
+        return;
+    }
+    uint32_t blocks_x = (lw + (uint32_t)bw - 1) / (uint32_t)bw;
+    uint32_t blocks_y = (lh + (uint32_t)bh - 1) / (uint32_t)bh;
+    if (blocks_x > SIZE_MAX / (size_t)bpb) return;
+    size_t src_row = (size_t)blocks_x * (size_t)bpb;
+    if (blocks_y > SIZE_MAX / src_row) return;
+    size_t slice_bytes = src_row * blocks_y;
+    if (slice_bytes > SIZE_MAX / nz) return;
+    // Each slice's buffer offset must be a multiple of 4 and of the texel block.
+    size_t slice_stride = slice_bytes;
+    size_t align = bpb >= 4 ? (size_t)bpb : 4;
+    if (slice_stride % align) slice_stride += align - slice_stride % align;
+    if (slice_stride > SIZE_MAX / nz) return;
+    size_t bytes = slice_stride * nz;
+    // The requested rectangle, in texels, clamped to this level.
+    uint32_t x0 = r && r->xoffset > 0 ? (uint32_t)r->xoffset : 0;
+    uint32_t y0 = r && r->yoffset > 0 ? (uint32_t)r->yoffset : 0;
+    uint32_t cw = r && r->width > 0 ? (uint32_t)r->width : lw;
+    uint32_t ch = r && r->height > 0 ? (uint32_t)r->height : lh;
+    if (x0 > lw) x0 = lw;
+    if (y0 > lh) y0 = lh;
+    if (cw > lw - x0) cw = lw - x0;
+    if (ch > lh - y0) ch = lh - y0;
+    if (!cw || !ch) return;
+    size_t xb = (size_t)(x0 / (uint32_t)bw) * (size_t)bpb;
+    uint32_t yb = y0 / (uint32_t)bh;
+    size_t wb = (size_t)((cw + (uint32_t)bw - 1) / (uint32_t)bw) * (size_t)bpb;
+    uint32_t hb = (ch + (uint32_t)bh - 1) / (uint32_t)bh;
+
+    // A multisampled colour target has no guest-readable samples: resolve it
+    // into a single-sample image of the same format first. Depth and stencil
+    // samples have no core resolve command, so those keep the red line.
+    VkImage rimg = VK_NULL_HANDLE;
+    VkDeviceMemory rmem = VK_NULL_HANDLE;
+    int resolve = e->samples > 1;
+    if (resolve) {
+        if (e->aspect != VK_IMAGE_ASPECT_COLOR_BIT) {
+            warn_once(&g_draw_warned, "readback of a multisampled depth or stencil texture");
+            return;
+        }
+        VkFormatProperties fp = {0};
+        vkGetPhysicalDeviceFormatProperties(g_vk.physical, e->fmt, &fp);
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+            warn_once(&g_draw_warned, "readback of a multisampled texture of a format without resolve support");
+            return;
+        }
+        if (nx_vk_create_image(&g_vk, VK_IMAGE_TYPE_2D, e->fmt, (VkExtent3D){lw, lh, 1}, 1, nz, 1,
+                               VK_IMAGE_TILING_OPTIMAL, 0,
+                               VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                               VK_IMAGE_LAYOUT_UNDEFINED, &rimg, &rmem) != 0) {
+            warn_once(&g_draw_warned, "readback of a multisampled texture could not allocate its resolve target");
+            return;
+        }
+    }
     VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void *map = NULL;
     if (nx_vk_create_buffer(&g_vk, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &buf, &mem, &map) != 0) return;
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &buf, &mem, &map) != 0) {
+        if (rimg) nx_vk_destroy_image(&g_vk, rimg, rmem);
+        return;
+    }
     VkCommandBuffer cb = nx_vk_oneshot_begin(&g_vk);
-    if (!cb) { nx_vk_destroy_buffer(&g_vk, buf, mem); return; }
+    if (!cb) {
+        nx_vk_destroy_buffer(&g_vk, buf, mem);
+        if (rimg) nx_vk_destroy_image(&g_vk, rimg, rmem);
+        return;
+    }
+    VkImageSubresourceRange whole = tex_subresources(e);
     VkImageMemoryBarrier b = {0};
     b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     b.oldLayout = e->layout; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = e->img; b.subresourceRange = tex_subresources(e);
+    b.image = e->img; b.subresourceRange = whole;
     b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
-    VkBufferImageCopy cp = {0};
-    cp.imageSubresource = (VkImageSubresourceLayers){e->aspect, level, layer0, 1};
-    cp.imageExtent = (VkExtent3D){w, h, 1};
-    vkCmdCopyImageToBuffer(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &cp);
+    for (uint32_t z = 0; z < nz; z++) {
+        VkImage copy_img = e->img;
+        VkImageLayout copy_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        VkImageSubresourceLayers sub = {e->aspect, level, is3d ? 0 : layer0 + z0 + z, 1};
+        int32_t oz = is3d ? (int32_t)(z0 + z) : 0;
+        if (resolve) {
+            if (z == 0) {
+                VkImageSubresourceRange rr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, nz};
+                VkImageMemoryBarrier tb = {0};
+                tb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                tb.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; tb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                tb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; tb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                tb.image = rimg; tb.subresourceRange = rr;
+                tb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &tb);
+                VkImageResolve res = {0};
+                res.srcSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, level, layer0 + z0, nz};
+                res.srcOffset = (VkOffset3D){0, 0, 0};
+                res.dstSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, nz};
+                res.dstOffset = (VkOffset3D){0, 0, 0};
+                res.extent = (VkExtent3D){lw, lh, 1};
+                vkCmdResolveImage(cb, e->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rimg,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &res);
+                VkImageMemoryBarrier rb = tb;
+                rb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; rb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                rb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; rb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &rb);
+            }
+            copy_img = rimg;
+            sub = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, z, 1};
+            oz = 0;
+        }
+        VkBufferImageCopy cp = {0};
+        cp.bufferOffset = (VkDeviceSize)z * slice_stride;
+        cp.imageSubresource = sub;
+        cp.imageOffset = (VkOffset3D){0, 0, oz};
+        cp.imageExtent = (VkExtent3D){lw, lh, 1};
+        vkCmdCopyImageToBuffer(cb, copy_img, copy_layout, buf, 1, &cp);
+    }
     VkBufferMemoryBarrier bb = {0};
     bb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
     bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -585,21 +755,17 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     nx_vk_oneshot_end(&g_vk, cb);
     e->layout = VK_IMAGE_LAYOUT_GENERAL;
     if (map) {
-        uint32_t x0 = r && r->xoffset > 0 ? (uint32_t)r->xoffset : 0;
-        uint32_t y0 = r && r->yoffset > 0 ? (uint32_t)r->yoffset : 0;
-        uint32_t cw = r && r->width > 0 ? (uint32_t)r->width : w;
-        uint32_t ch = r && r->height > 0 ? (uint32_t)r->height : h;
-        if (x0 > w) x0 = w;
-        if (y0 > h) y0 = h;
-        if (cw > w - x0) cw = w - x0;
-        if (ch > h - y0) ch = h - y0;
-        size_t n = (size_t)cw * (size_t)bpb;
-        if (n > row) n = row;
-        for (uint32_t y = 0; y < ch; y++)
-            memcpy(dst + (size_t)y * row, (uint8_t *)map + (size_t)(y0 + y) * src_row + (size_t)x0 * (size_t)bpb, n);
+        for (uint32_t z = 0; z < nz; z++) {
+            const uint8_t *zsrc = (const uint8_t *)map + (size_t)z * slice_stride;
+            uint8_t *zdst = dst + (size_t)z * (img ? img : row * hb);
+            size_t n = wb;
+            if (n > row) n = row;
+            for (uint32_t y = 0; y < hb; y++)
+                memcpy(zdst + (size_t)y * row, zsrc + (size_t)(yb + y) * src_row + xb, n);
+        }
     }
-    vkUnmapMemory(g_vk.device, mem);
     nx_vk_destroy_buffer(&g_vk, buf, mem);
+    if (rimg) nx_vk_destroy_image(&g_vk, rimg, rmem);
 }
 
 void mtl_prog_release(prog_t *p) {
@@ -933,6 +1099,11 @@ void mtl_exec(const uint8_t *p) {
             // targets, like a scissored clear.
             int attachment_clear = partial_stencil || !is_3d || rectangular_clear;
             if (attachment_clear) {
+                if (!e->can_attach) {
+                    static int warned;
+                    if (!warned++) LOG("[RED] [nvn/vk] depth/stencil clear target format %d cannot be a render target on this device", g_rt.depth->d.format);
+                    nx_vk_oneshot_end(&g_vk, cb); break;
+                }
                 if (is_3d && !g_vk.caps.image_2d_view_of_3d) {
                     nx_vk_oneshot_end(&g_vk, cb);
                     LOG("[RED] [nvn/vk] partial depth/stencil 3D clear requires image2DViewOf3D"); break;

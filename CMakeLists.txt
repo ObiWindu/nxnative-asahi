@@ -321,6 +321,14 @@ if(NXNATIVE_BUILD_TESTS)
     target_link_libraries(t_nvn_drawtex PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
     add_test(NAME nvn_drawtex COMMAND t_nvn_drawtex)
 
+    add_executable(t_nvn_readback tests/t_nvn_readback.c)
+    target_link_libraries(t_nvn_readback PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
+    add_test(NAME nvn_readback COMMAND t_nvn_readback)
+
+    add_executable(t_nvn_view_swizzle tests/t_nvn_view_swizzle.c)
+    target_link_libraries(t_nvn_view_swizzle PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
+    add_test(NAME nvn_view_swizzle COMMAND t_nvn_view_swizzle)
+
     add_executable(t_nvn_copy tests/t_nvn_copy.c)
     target_link_libraries(t_nvn_copy PRIVATE nxnative_nvn)
     add_test(NAME nvn_copy COMMAND t_nvn_copy)
