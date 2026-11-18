@@ -123,16 +123,16 @@ typedef struct { uint32_t op, size; } op_hdr;
 // pieces into the caller's list, as the driver copies a command set's GPU FIFO entries: the called recording's control memory may be given out again once the call is recorded,
 // its command memory not before the caller has run (Donkey Kong Bananza resets the arena of its control memory twice per arena of command memory).
 //   bits 63-62 kind: CTL_CHUNK records at addr, len bytes; CTL_LINK the list goes on at addr (its control memory ran out). Kinds 0 and 2 are never written.
-//   bit 61 CTL_LAST: the list ends after this entry (not on a LINK). bits 60-44 len / 8 (CTL_CHUNK: at most CTL_CHUNK_MAX bytes; CTL_ONE = one record, as long as its header says).
-//   bits 43-0 addr / 8 (every address is 8-aligned, below 2^47)
+//   bit 61 CTL_LAST: the list ends after this entry (not on a LINK). bits 60-45 len / 8 (CTL_CHUNK: at most CTL_CHUNK_MAX bytes; CTL_ONE = one record, as long as its header says).
+//   bits 44-0 addr / 8 (every address is 8-aligned, below 2^48)
 enum { CTL_CHUNK = 1, CTL_LINK = 3 };
 #define CTL_LAST (UINT64_C(1) << 61)
-#define CTL_ONE (((UINT64_C(1) << 17) - 1) * 8)
+#define CTL_ONE (((UINT64_C(1) << 16) - 1) * 8)
 #define CTL_CHUNK_MAX (CTL_ONE - 8)
-static inline uint64_t ctl_e(unsigned kind, const void *addr, uint64_t len) { return (uint64_t)kind << 62 | (len >> 3) << 44 | (uint64_t)(uintptr_t)addr >> 3; }
+static inline uint64_t ctl_e(unsigned kind, const void *addr, uint64_t len) { return (uint64_t)kind << 62 | (len >> 3) << 45 | (uint64_t)(uintptr_t)addr >> 3; }
 static inline unsigned ctl_kind(uint64_t e) { return (unsigned)(e >> 62); }
-static inline const uint8_t *ctl_addr(uint64_t e) { return (const uint8_t *)(uintptr_t)((e & ((UINT64_C(1) << 44) - 1)) << 3); }
-static inline uint64_t ctl_len(uint64_t e) { return (e >> 44 & ((UINT64_C(1) << 17) - 1)) << 3; }
+static inline const uint8_t *ctl_addr(uint64_t e) { return (const uint8_t *)(uintptr_t)((e & ((UINT64_C(1) << 45) - 1)) << 3); }
+static inline uint64_t ctl_len(uint64_t e) { return (e >> 45 & ((UINT64_C(1) << 16) - 1)) << 3; }
 static inline size_t ctl_chunk_bytes(uint64_t e) { uint64_t n = ctl_len(e); if (n == CTL_ONE) { op_hdr h; memcpy(&h, ctl_addr(e), sizeof h); n = h.size; } return (size_t)n; }
 // Compact records: forms only command memory holds, as small as the driver's command for the same call or close to it where the 8-byte header allows (docs/reference/memory.md,
 // "Model heaps sized by the host's command record sizes"). The queue's flatten expands each into the canonical records (hle_nvn.c rec_expand), so replay and capture never see them.

@@ -111,6 +111,32 @@ int main(void) {
     }
     CHECK(clear_region_ok, "partial texture clear changes only its requested rectangle");
 
+    // ClearTexture's channel mask: an alpha-only clear over part of b leaves
+    // every RGB texel and the alpha outside the rectangle as they were. The
+    // replay draws it as a triangle because vkCmdClearColorImage writes all
+    // four components.
+    NVNcopyRegion alpha_region = {2, 2, 0, 2, 2, 1};
+    const float half_alpha[4] = {0, 0, 0, 0.5f};
+    NVNcommandBuffer cb_alpha_mask;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_alpha_mask, &dev) == 1, "alpha-mask clear command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_alpha_mask, &pool, 0x1c000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_alpha_mask);
+    NVNF(nvnCommandBufferClearTexture)(&cb_alpha_mask, &b, NULL, &alpha_region, half_alpha, 0x8);
+    NVNcommandHandle ham = NVNF(nvnCommandBufferEndRecording)(&cb_alpha_mask);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &ham);
+    NVNF(nvnQueueFinish)(&q);
+    uint8_t masked[8 * 8 * 4];
+    mtl_read_texels(&b, 0, 0, &full8, masked, 8 * 4, 8 * 8 * 4);
+    int alpha_mask_ok = 1;
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+        const uint8_t *actual = masked + (y * 8 + x) * 4;
+        const uint8_t *before = cleared + (y * 8 + x) * 4;
+        int inside = x >= 2 && x < 4 && y >= 2 && y < 4;
+        alpha_mask_ok &= memcmp(actual, before, 3) == 0;
+        alpha_mask_ok &= inside ? (actual[3] >= 126 && actual[3] <= 129) : actual[3] == before[3];
+    }
+    CHECK(alpha_mask_ok, "texture clear mask 0x8 writes alpha only inside its rectangle");
+
     // Exercise every selection field used by image copies: mip 1, array layer
     // 1, two-layer regions, row padding and per-image padding.
     NVNtexture aa, ab;

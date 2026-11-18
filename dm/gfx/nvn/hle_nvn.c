@@ -1236,7 +1236,7 @@ static int ctl_next(ctl_iter *it, uint64_t *out) {
     return 0;
 }
 static int ctl_handle_ok(NVNcommandHandle h) {
-    if (h && !(h & 7) && !(h >> 47)) return 1;
+    if (h && !(h & 7) && !(h >> 48)) return 1;
     LOG("[RED] CallCommands / CopyCommands: handle %#llx is no command list", (unsigned long long)h); return 0;
 }
 // The record at p in a piece [ctl_addr(v), pe) of list, into h; 0 at the piece's end, or when the record there does not fit in what is left of the piece. A piece's bytes are
@@ -1713,7 +1713,7 @@ NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNte
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
     if (o->dst) mtl_tex_gpu_written(o->dst);
 }
-// A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m), using the pools active at execution. Only the handle's lower 32 bits reach the GPU.
+// A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m on Metal, draw_tex_record in nvn_vk_draw.inc on Vulkan), using the pools active at execution. Only the handle's lower 32 bits reach the GPU.
 NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, const NVNdrawTextureRegion *d, const NVNdrawTextureRegion *s) {
     *REC(c, OP_DRAW_TEX, p_draw_tex) = (p_draw_tex){(uint32_t)h, *d, *s};
 }

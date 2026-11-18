@@ -169,6 +169,47 @@ int main(void) {
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
     CHECK(mid[1] > 200 && mid[0] < 40 && mid[2] < 40,
           "texture2DArray layer 1 reached the centre: %u %u %u", mid[0], mid[1], mid[2]);
+
+    // A masked colour clear over a layered target must clear every layer. The
+    // replay draws it as a triangle, which reaches only layer 0 unless each
+    // layer gets its own pass.
+    NVNtexture array_mask;
+    NVNtextureBuilder amb;
+    NVNF(nvnTextureBuilderSetDefaults)(&amb); NVNF(nvnTextureBuilderSetDevice)(&amb, &dev);
+    NVNF(nvnTextureBuilderSetTarget)(&amb, NVN_TEXTURE_TARGET_2D_ARRAY);
+    NVNF(nvnTextureBuilderSetSize2D)(&amb, 4, 4);
+    NVNF(nvnTextureBuilderSetDepth)(&amb, 2);
+    NVNF(nvnTextureBuilderSetFormat)(&amb, NVN_FORMAT_RGBA8);
+    NVNF(nvnTextureBuilderSetStorage)(&amb, &pool, 0x50000);
+    CHECK(NVNF(nvnTextureInitialize)(&array_mask, &amb) == 1, "masked array target initializes");
+    NVNcommandBuffer cb_array_mask;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_array_mask, &dev) == 1, "masked array-clear command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_array_mask, &pool, 0x20000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_array_mask);
+    const NVNtexture *array_color[1] = {&array_mask};
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_array_mask, 1, array_color, NULL, NULL, NULL);
+    NVNF(nvnCommandBufferSetScissor)(&cb_array_mask, 0, 0, 4, 4);
+    float white[4] = {1, 1, 1, 1};
+    NVNF(nvnCommandBufferClearColor)(&cb_array_mask, 0, white, 0xf);
+    float zero[4] = {0, 0, 0, 0};
+    NVNF(nvnCommandBufferClearColor)(&cb_array_mask, 0, zero, 0x1);
+    NVNcommandHandle ham = NVNF(nvnCommandBufferEndRecording)(&cb_array_mask);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &ham);
+    NVNF(nvnQueueFinish)(&q);
+    NVNcopyRegion arr_all = {0, 0, 0, 4, 4, 1};
+    uint8_t arr_px[4 * 4 * 4];
+    int layers_ok = 1;
+    uint8_t first[2][4] = {{0}};
+    for (unsigned layer = 0; layer < 2; layer++) {
+        mtl_read_texels(&array_mask, 0, layer, &arr_all, arr_px, 4 * 4, 4 * 4 * 4);
+        memcpy(first[layer], arr_px, 4);
+        for (int i = 0; i < 4 * 4; i++)
+            layers_ok &= arr_px[i * 4] == 0 && arr_px[i * 4 + 1] == 255 &&
+                         arr_px[i * 4 + 2] == 255 && arr_px[i * 4 + 3] == 255;
+    }
+    CHECK(layers_ok, "mask 0x1 clears red in every layer of a 2D array target (layers %u,%u,%u,%u and %u,%u,%u,%u)",
+          first[0][0], first[0][1], first[0][2], first[0][3],
+          first[1][0], first[1][1], first[1][2], first[1][3]);
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN ARRAY TEXTURE TEST FAILED" : "NVN ARRAY TEXTURE TEST PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }

@@ -176,6 +176,46 @@ int main(void) {
     CHECK(mid[1] > 250 && mid[0] < 5 && corner[2] > 200,
           "scissored color clear changes its rectangle and preserves outside pixels");
 
+    // A channel mask writes only the named channels: a red+green clear leaves
+    // blue and alpha as the prior draw left them (center was green, corner
+    // blue). The replay draws this as a full-target triangle with the mask.
+    NVNcommandBuffer cb_channel_mask;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_channel_mask, &dev) == 1, "channel-mask clear command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_channel_mask, &pool, 0x50000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_channel_mask);
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_channel_mask, 1, only_color, NULL, NULL, NULL);
+    NVNF(nvnCommandBufferSetScissor)(&cb_channel_mask, 0, 0, 64, 64);
+    float red[4] = {1, 0, 0, 1};
+    NVNF(nvnCommandBufferClearColor)(&cb_channel_mask, 0, red, 0x3);
+    NVNcommandHandle hcm = NVNF(nvnCommandBufferEndRecording)(&cb_channel_mask);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hcm);
+    NVNF(nvnQueueFinish)(&q);
+    mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    mid = px + (32 * 64 + 32) * 4;
+    corner = px;
+    CHECK(mid[0] > 250 && mid[1] < 5 && mid[2] < 5 && mid[3] > 250,
+          "mask 0x3 writes red and green and keeps blue/alpha: centre %u %u %u %u", mid[0], mid[1], mid[2], mid[3]);
+    CHECK(corner[0] > 250 && corner[1] < 5 && corner[2] > 200 && corner[3] > 250,
+          "masked clear preserved the corner's blue and alpha: %u %u %u %u", corner[0], corner[1], corner[2], corner[3]);
+
+    NVNcommandBuffer cb_mask_scissor;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_mask_scissor, &dev) == 1, "scissored channel-mask command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_mask_scissor, &pool, 0x58000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_mask_scissor);
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_mask_scissor, 1, only_color, NULL, NULL, NULL);
+    NVNF(nvnCommandBufferSetScissor)(&cb_mask_scissor, 24, 24, 16, 16);
+    NVNF(nvnCommandBufferClearColor)(&cb_mask_scissor, 0, green, 0x2);
+    NVNcommandHandle hms = NVNF(nvnCommandBufferEndRecording)(&cb_mask_scissor);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hms);
+    NVNF(nvnQueueFinish)(&q);
+    mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    mid = px + (32 * 64 + 32) * 4;
+    corner = px;
+    CHECK(mid[0] > 250 && mid[1] > 250 && mid[2] < 5 && mid[3] > 250,
+          "scissored green-only clear applies inside its rectangle: %u %u %u %u", mid[0], mid[1], mid[2], mid[3]);
+    CHECK(corner[0] > 250 && corner[1] < 5 && corner[2] > 200 && corner[3] > 250,
+          "scissored masked clear preserved outside pixels: %u %u %u %u", corner[0], corner[1], corner[2], corner[3]);
+
     // A depth clear with depthMask=0 must leave the existing depth value
     // intact. If replay clears unconditionally, the z=0.25 draw below passes
     // against the incorrectly replaced value 1.0 and paints the blue target red.
@@ -242,6 +282,52 @@ int main(void) {
     mid = px + (32 * 64 + 32) * 4;
     CHECK(mid[2] > 200 && mid[0] < 40,
           "depthMask=0 preserves the prior depth attachment value: %u %u %u", mid[0], mid[1], mid[2]);
+
+    // A stencil write mask clears only the bits it names. Use an S8 attachment
+    // so the test can read the plane back; partial-bit clears are drawn as the
+    // clear triangle with a REPLACE stencil op through the mask.
+    NVNtexture stencil_tex;
+    NVNtextureBuilder stencil_tb;
+    NVNF(nvnTextureBuilderSetDefaults)(&stencil_tb); NVNF(nvnTextureBuilderSetDevice)(&stencil_tb, &dev);
+    NVNF(nvnTextureBuilderSetTarget)(&stencil_tb, NVN_TEXTURE_TARGET_2D);
+    NVNF(nvnTextureBuilderSetSize2D)(&stencil_tb, 64, 64);
+    NVNF(nvnTextureBuilderSetFormat)(&stencil_tb, NVN_FORMAT_STENCIL8);
+    NVNF(nvnTextureBuilderSetFlags)(&stencil_tb, NVN_TEXTURE_FLAGS_LINEAR);
+    NVNF(nvnTextureBuilderSetStorage)(&stencil_tb, &pool, 0x90000);
+    CHECK(NVNF(nvnTextureInitialize)(&stencil_tex, &stencil_tb) == 1, "stencil test attachment initializes");
+
+    NVNcommandBuffer cb_stencil_bits;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_stencil_bits, &dev) == 1, "stencil-bit command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_stencil_bits, &pool, 0x60000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_stencil_bits);
+    const NVNtexture *stencil_color[1] = {&tex};
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_stencil_bits, 1, stencil_color, NULL, &stencil_tex, NULL);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_stencil_bits, 1.0f, 0, 0x00, 0xff);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_stencil_bits, 1.0f, 0, 0x0f, 0x0f);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_stencil_bits, 1.0f, 0, 0xf0, 0xf0);
+    NVNcommandHandle hsb = NVNF(nvnCommandBufferEndRecording)(&cb_stencil_bits);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hsb);
+    NVNF(nvnQueueFinish)(&q);
+    uint8_t spx[64 * 64];
+    mtl_read_texels(&stencil_tex, 0, 0, &all, spx, 64, 64 * 64);
+    int bits_ok = 1;
+    for (int i = 0; i < 64 * 64; i++) bits_ok &= spx[i] == 0xff;
+    CHECK(bits_ok, "successive low- and high-nibble stencil clears write all eight bits: centre %#x", spx[32 * 64 + 32]);
+
+    NVNcommandBuffer cb_stencil_scissor;
+    CHECK(NVNF(nvnCommandBufferInitialize)(&cb_stencil_scissor, &dev) == 1, "scissored stencil-bit command buffer initializes");
+    NVNF(nvnCommandBufferAddCommandMemory)(&cb_stencil_scissor, &pool, 0x68000, 0x10000);
+    NVNF(nvnCommandBufferBeginRecording)(&cb_stencil_scissor);
+    NVNF(nvnCommandBufferSetRenderTargets)(&cb_stencil_scissor, 1, stencil_color, NULL, &stencil_tex, NULL);
+    NVNF(nvnCommandBufferSetScissor)(&cb_stencil_scissor, 24, 24, 16, 16);
+    NVNF(nvnCommandBufferClearDepthStencil)(&cb_stencil_scissor, 1.0f, 0, 0x00, 0x0f);
+    NVNcommandHandle hss = NVNF(nvnCommandBufferEndRecording)(&cb_stencil_scissor);
+    NVNF(nvnQueueSubmitCommands)(&q, 1, &hss);
+    NVNF(nvnQueueFinish)(&q);
+    mtl_read_texels(&stencil_tex, 0, 0, &all, spx, 64, 64 * 64);
+    CHECK(spx[32 * 64 + 32] == 0xf0 && spx[0] == 0xff,
+          "scissored partial stencil clear clears its bits inside the rectangle only: centre %#x corner %#x",
+          spx[32 * 64 + 32], spx[0]);
     extern uint64_t mtl_present(const void *, double, const int *, uint64_t *);
     uint64_t copy = 0;
     uint64_t ticket = mtl_present(&tex, 1.0 / 60.0, NULL, &copy);

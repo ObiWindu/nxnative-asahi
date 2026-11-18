@@ -313,6 +313,14 @@ if(NXNATIVE_BUILD_TESTS)
     target_link_libraries(t_nvn_indexed PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
     add_test(NAME nvn_indexed COMMAND t_nvn_indexed)
 
+    add_executable(t_nvn_viewport tests/t_nvn_viewport.c)
+    target_link_libraries(t_nvn_viewport PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
+    add_test(NAME nvn_viewport COMMAND t_nvn_viewport)
+
+    add_executable(t_nvn_drawtex tests/t_nvn_drawtex.c)
+    target_link_libraries(t_nvn_drawtex PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
+    add_test(NAME nvn_drawtex COMMAND t_nvn_drawtex)
+
     add_executable(t_nvn_copy tests/t_nvn_copy.c)
     target_link_libraries(t_nvn_copy PRIVATE nxnative_nvn)
     add_test(NAME nvn_copy COMMAND t_nvn_copy)

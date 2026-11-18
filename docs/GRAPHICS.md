@@ -69,9 +69,18 @@ expansion and texture layout/deswizzle math. The Asahi replay
 Vulkan work:
 
 - device, queues, memory pools, command buffers, submission, fences and events;
-- render targets (colour and depth), clears and barriers; `OP_BARRIER` maps
-  defined NVN ordering and invalidate bits to a conservative Vulkan memory
-  dependency across commands;
+- render targets (colour and depth), clears and barriers; NVN clears honour
+  colour-channel and stencil write masks and scissor rectangles: full-target
+  full-mask clears use transfer or attachment clears, and the rest are drawn as
+  one full-target triangle with the embedded SPIR-V in
+  `src/graphics/nvn/nvn_spv_builtin.h` (`dm/gfx/tools/gen_spv_builtin.py`), so no
+  shader compiler is needed at build time. `OP_BARRIER` maps defined NVN
+  ordering and invalidate bits to a conservative Vulkan memory dependency
+  across commands;
+- `nvnCommandBufferDrawTexture`: a source texel region sampled through the
+  handle's sampler into a destination pixel rectangle of each colour target,
+  drawn as the same kind of full-target triangle with the target's channel mask
+  and the destination clamped by the scissor (the built-in `drawtex` shaders);
 - buffer→texture, texture→texture and texture→buffer copies;
 - buffer textures (`samplerBuffer`, `UNIFORM_TEXEL_BUFFER`);
 - 2D array, cube and 3D textures with every layer/slice of every level uploaded;

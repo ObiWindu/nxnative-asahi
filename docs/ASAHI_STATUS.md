@@ -54,8 +54,12 @@ development environment, so the first real game bring-up is still open.
 - NVN→Vulkan replay backend:
   - devices, queues, memory pools, command buffers, submission, fences and
     events;
-  - render targets (colour and depth), clears and barriers, including
+  - render targets (colour and depth), clears (including NVN's colour-channel
+    and stencil write masks and scissor rectangles) and barriers, including
     buffer→texture, texture→texture and texture→buffer copies;
+  - `nvnCommandBufferDrawTexture`: a sampled source texel region into a
+    destination pixel rectangle of each colour target, with the scissor and the
+    channel masks;
   - NVN textures and samplers, texture-ID and sampler-ID pools, views, CPU and
     GPU ownership tracking, guest-memory upload and GPU readback;
   - shader cache loading of the translated SPIR-V modules (`<key>_b.spv`)

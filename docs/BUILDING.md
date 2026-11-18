@@ -177,6 +177,14 @@ The chain version is in `dm/gfx/nvn/dmsh_chain.h`. The translator, extractor
 and SPIRV-Cross are native AArch64 Linux binaries built from the in-repo
 sources (`dm/tools/native_tools.sh`, `dm/gfx/tools/spirv_cross_bin/build.sh`).
 
+The host's built-in shaders (the clear triangle in
+`dm/gfx/glsl/clear*.{vert,frag}` and `nvnCommandBufferDrawTexture`'s textured
+rectangle in `dm/gfx/glsl/drawtex.{vert,frag}`) are compiled once and checked in
+as `src/graphics/nvn/nvn_spv_builtin.h`, so the host build needs no GLSL
+compiler.
+`python3 dm/gfx/tools/gen_spv_builtin.py --check` verifies the header; without
+`--check` the script regenerates it using the system's `libshaderc`.
+
 The Vulkan path expects a graphical session. On a headless SSH session, force
 the headless front end with:
 
@@ -193,12 +201,12 @@ surface. Keyboard and gamepad input are read each poll.
 ctest --test-dir build --output-on-failure
 ```
 
-A profile build runs thirty-two tests. A platform-only build (no
+A profile build runs forty tests. A platform-only build (no
 `NXNATIVE_GAME`) runs the ten that do not need the guest host: the memory,
 Vulkan, Vulkan-interception, shader-cache, PCM and launcher tests. The NVN
 replay tests and `AudioOut` need a profile.
 
-Thirty-eight tests (profile build):
+Forty tests (profile build):
 
 | Test | What it proves |
 |---|---|
@@ -220,8 +228,10 @@ Thirty-eight tests (profile build):
 | `nvn_cube` | Cubemap faces and `samplerCube` readback |
 | `nvn_3d` | 3D texture slices and `sampler3D` readback |
 | `nvn_msaa` | 4× MSAA draw and downsample resolve |
-| `nvn_indexed` | Indexed draw through a guest index buffer |
-| `nvn_copy` | Buffer/texture and texture/texture copies with byte-exact round trip |
+| `nvn_indexed` | Indexed draws, primitive expansion, uint8 widening/base vertex, timestamp reports and conditional clear/draw suppression |
+| `nvn_viewport` | Viewport origin, `SetViewportSwizzles` NEGATIVE_Y, line width and the queue-origin-aware front face |
+| `nvn_drawtex` | `nvnCommandBufferDrawTexture`: source/destination regions, scissor, mirrored destination and the channel mask |
+| `nvn_copy` | Buffer/texture and texture/texture copies with byte-exact round trip; masked and rectangular texture clears |
 | `nvn_compute` | Compute program, SSBO binding, dispatch and guest-memory copy-back |
 | `nvn_compute_image` | Compute storage-image write and readback |
 | `nvn_depth` | NVN near=-w depth rewrite and fragment-depth readback |

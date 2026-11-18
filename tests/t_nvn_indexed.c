@@ -4,6 +4,7 @@
 // under the keys the zeroed control sections hash to.
 #include "dm.h"
 #include "nvn.h"
+#include "nvn_obj.h"
 #include "nvn_protos.h"
 #include <dlfcn.h>
 #include <stdint.h>
@@ -14,7 +15,6 @@
 #include <unistd.h>
 
 extern void *dm_nvn_test_lookup(const char *name);
-void mtl_read_texels(const void *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);
 #define NVNF(name) ((NVNT_##name)dm_nvn_test_lookup(#name))
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: "); printf(__VA_ARGS__); printf("\n"); g_fail++; } else { printf("ok: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -72,6 +72,12 @@ int main(void) {
     if (put(path, fsjson, strlen(fsjson))) { printf("FAIL: write fs json\n"); return 1; }
 
     int g_fail = 0;
+    // Asahi's 48-bit userspace places guest memory above 2^47. A control
+    // entry must preserve the full address while retaining its length/tag.
+    const uintptr_t high = UINT64_C(0x0000ffef12345000);
+    uint64_t entry = ctl_e(CTL_CHUNK, (const void *)high, 0x120);
+    CHECK((uintptr_t)ctl_addr(entry) == high && ctl_len(entry) == 0x120 && ctl_kind(entry) == CTL_CHUNK,
+          "NVN control entry round-trips a 48-bit address and length");
     NVNdeviceBuilder db; NVNdevice dev;
     NVNF(nvnDeviceBuilderSetDefaults)(&db); NVNF(nvnDeviceBuilderSetFlags)(&db, 0);
     CHECK(NVNF(nvnDeviceInitialize)(&dev, &db) == 1, "device initializes");
@@ -157,13 +163,33 @@ int main(void) {
     NVNF(nvnCommandBufferSetPrimitiveRestart)(&cb, 0, 0xff);
     NVNF(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_QUADS,
         NVN_INDEX_TYPE_UNSIGNED_BYTE, 4, (NVNbufferAddress)(uintptr_t)idx8, 3);
+    NVNcounterData *counter = (NVNcounterData *)(storage + 0xa100);
+    counter[0] = (NVNcounterData){17, 0};
+    counter[1] = (NVNcounterData){1, 0};
+    NVNF(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP_TOP,
+        (NVNbufferAddress)(uintptr_t)counter);
+    NVNF(nvnCommandBufferSetRenderEnableConditional)(&cb,
+        NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_EQUAL, (NVNbufferAddress)(uintptr_t)counter);
+    float green[4] = {0, 1, 0, 1};
+    NVNF(nvnCommandBufferClearColor)(&cb, 0, green, 0xf);
+    NVNF(nvnCommandBufferDrawElementsBaseVertex)(&cb, NVN_DRAW_PRIMITIVE_QUADS,
+        NVN_INDEX_TYPE_UNSIGNED_BYTE, 4, (NVNbufferAddress)(uintptr_t)idx8, 3);
+    // A known-false NOT_EQUAL condition must suppress clears too.
+    NVNcounterData equal_counters[2] = {{9, 0}, {9, 0}};
+    NVNF(nvnCommandBufferUpdateUniformBuffer)(&cb,
+        (NVNbufferAddress)(uintptr_t)(storage + 0xa200), sizeof equal_counters,
+        0, sizeof equal_counters, equal_counters);
+    NVNF(nvnCommandBufferSetRenderEnableConditional)(&cb,
+        NVN_CONDITIONAL_RENDER_MODE_RENDER_IF_NOT_EQUAL, (NVNbufferAddress)(uintptr_t)(storage + 0xa200));
+    NVNF(nvnCommandBufferClearColor)(&cb, 0, green, 0xf);
+    NVNF(nvnCommandBufferSetRenderEnable)(&cb, 1);
     NVNcommandHandle h = NVNF(nvnCommandBufferEndRecording)(&cb);
     NVNF(nvnQueueSubmitCommands)(&q, 1, &h);
     NVNF(nvnQueueFinish)(&q);
 
     uint8_t px[64 * 64 * 4];
     NVNcopyRegion all = {0, 0, 0, 64, 64, 1};
-    mtl_read_texels(&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
+    mtl_read_texels((const tex_t *)&tex, 0, 0, &all, px, 64 * 4, 64 * 4);
     const uint8_t *corner = px;
     const uint8_t *mid = px + (32 * 64 + 32) * 4;
     CHECK(corner[2] > 200 && corner[0] < 40, "clear reached the target corner: %u %u %u", corner[0], corner[1], corner[2]);
@@ -179,6 +205,11 @@ int main(void) {
           "expanded uint8 quad preserves baseVertex=3 and leaves unrelated geometry clear: left %u %u %u right %u %u %u",
           base_vertex_quad[0], base_vertex_quad[1], base_vertex_quad[2],
           base_vertex_unaffected[0], base_vertex_unaffected[1], base_vertex_unaffected[2]);
+    CHECK(counter[0].counter == 0 && counter[0].timestamp != 0,
+          "timestamp-top report writes zero to the counter field and a guest-clock timestamp");
+    CHECK(base_vertex_quad[0] > 200 && base_vertex_quad[1] < 40 && base_vertex_quad[2] < 40,
+          "false equal and not-equal render conditions suppress draws and clears: left %u %u %u",
+          base_vertex_quad[0], base_vertex_quad[1], base_vertex_quad[2]);
     printf("\n%s (%d failure%s)\n", g_fail ? "NVN INDEXED DRAW TEST FAILED" : "NVN INDEXED DRAW TEST PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;
 }
