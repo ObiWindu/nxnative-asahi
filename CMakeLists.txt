@@ -8,6 +8,7 @@ option(NXNATIVE_BUILD_TESTS "Build the Asahi port's tests" ON)
 option(NXNATIVE_BUILD_HOST "Build the guest-execution host (needs a game profile)" OFF)
 option(NXNATIVE_WERROR "Treat warnings as errors" OFF)
 set(NXNATIVE_GAME "" CACHE STRING "Base game title ID for a host build (e.g. 010015100B514000)")
+set(NXNATIVE_GAME_PROFILE_DIR "" CACHE PATH "Game profile directory (defaults to dm/games/<NXNATIVE_GAME>)")
 set(NXNATIVE_VK_VALIDATION "OFF" CACHE STRING "Enable Vulkan validation layers by default (ON/OFF)")
 
 # The generated profile header is needed by the host, the NVN replay and the
@@ -15,11 +16,22 @@ set(NXNATIVE_VK_VALIDATION "OFF" CACHE STRING "Enable Vulkan validation layers b
 set(GAME_HEADER_DIR "")
 if(NXNATIVE_GAME)
   set(GAME_HEADER_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen/${NXNATIVE_GAME})
+  if(NOT NXNATIVE_GAME_PROFILE_DIR)
+    set(NXNATIVE_GAME_PROFILE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/dm/games/${NXNATIVE_GAME})
+  endif()
+  get_filename_component(NXNATIVE_GAME_PROFILE_ROOT ${NXNATIVE_GAME_PROFILE_DIR} DIRECTORY)
+  if(NOT EXISTS ${NXNATIVE_GAME_PROFILE_DIR}/game.tsv)
+    message(FATAL_ERROR
+      "No game profile at ${NXNATIVE_GAME_PROFILE_DIR}/game.tsv; set NXNATIVE_GAME_PROFILE_DIR or add the profile under dm/games")
+  endif()
   add_custom_command(
     OUTPUT ${GAME_HEADER_DIR}/game_profile.h
     COMMAND ${CMAKE_COMMAND} -E make_directory ${GAME_HEADER_DIR}
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/dm/games/game.py header ${NXNATIVE_GAME} ${GAME_HEADER_DIR}/game_profile.h
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dm/games/${NXNATIVE_GAME}/game.tsv
+    COMMAND ${CMAKE_COMMAND} -E env
+            "DM_GAMES_DIR=${NXNATIVE_GAME_PROFILE_ROOT}"
+            "DM_GAMES_FIRST=1"
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/dm/games/game.py header ${NXNATIVE_GAME} ${GAME_HEADER_DIR}/game_profile.h
+    DEPENDS ${NXNATIVE_GAME_PROFILE_DIR}/game.tsv
             ${CMAKE_CURRENT_SOURCE_DIR}/dm/games/game.py
     COMMENT "Generating game profile header"
   )
@@ -328,6 +340,10 @@ if(NXNATIVE_BUILD_TESTS)
     add_executable(t_nvn_view_swizzle tests/t_nvn_view_swizzle.c)
     target_link_libraries(t_nvn_view_swizzle PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
     add_test(NAME nvn_view_swizzle COMMAND t_nvn_view_swizzle)
+
+    add_executable(t_nvn_stage_bind tests/t_nvn_stage_bind.c)
+    target_link_libraries(t_nvn_stage_bind PRIVATE nxnative_nvn ${CMAKE_DL_LIBS})
+    add_test(NAME nvn_stage_bind COMMAND t_nvn_stage_bind)
 
     add_executable(t_nvn_copy tests/t_nvn_copy.c)
     target_link_libraries(t_nvn_copy PRIVATE nxnative_nvn)

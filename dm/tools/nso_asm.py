@@ -1,5 +1,7 @@
 # AArch64 instruction encoders of the NSO rewriter (dm/tools/patch_nso.py) and of the per-build patch files (dm/tools/sdk_patches.py, dm/games/<id>/patches.py),
 # which assemble their stubs with them. Each returns the instruction word; a branch asserts its reach
+import os
+
 def B(frm, to):
     off = to - frm; assert -(1 << 27) <= off < (1 << 27) and off % 4 == 0
     return 0x14000000 | ((off >> 2) & 0x3FFFFFF)
@@ -16,7 +18,12 @@ def LDUR(t, n, off): return 0xF8400000 | ((off & 0x1FF) << 12) | (n << 5) | t   
 def LDRX(t, n, imm12=0): return 0xF9400000 | (imm12 << 10) | (n << 5) | t
 def STRX(t, n, imm12=0): return 0xF9000000 | (imm12 << 10) | (n << 5) | t
 def MOVX(dd, m): return 0xAA0003E0 | (m << 16) | dd   # mov xd, xm (orr xd, xzr, xm)
-def MRS_TPIDRRO(t): return 0xD53BD060 | t
+def MRS_TPIDRRO(t):
+    # Rewriter stubs use TPIDRRO as the base for host pthread-specific slots.
+    # Darwin exposes that array from TPIDRRO_EL0; the Linux host discovers
+    # glibc's first-block slots relative to TPIDR_EL0 instead.
+    reg = 0xD53BD040 if os.environ.get('DM_REWRITE_PLATFORM') == 'linux' else 0xD53BD060
+    return reg | t
 def ADRP(dd, pc, target):
     imm = ((target & ~0xFFF) - (pc & ~0xFFF)) >> 12; assert -(1 << 20) <= imm < (1 << 20)
     return 0x90000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7FFFF) << 5) | dd

@@ -10,6 +10,14 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Cause:** the SDK movie library's hardware decoder opens nvdrv directly.
 - **Fix:** the host takes over `movie::Decoder` (`hle_movie.c`, [`movie::Decoder` taken over as a MediaCodec-style protocol](#moviedecoder-taken-over-as-a-mediacodec-style-protocol)); nvdrv opens fail (`hle_nvdrv.c`).
 
+### The movie library on Linux (libavcodec)
+
+- **Symptom:** on the Asahi host a game's films never play, and Super Mario Odyssey's first movie ends in the guest's own codec stack: a SIGSEGV at `sdk+0x2ae72c` (a `HeapObject::operator new(0x38)` that returned null, so `android::RefBase::RefBase` wrote its vtable through `this = 0x28`) returned to from `subsdk0`'s `android::ACodec::UninitializedState::onAllocateComponent`, or the same place hangs with every thread idle.
+- **Cause:** `dm/host/hle_movie.c` (the host's `movie::Decoder` take-over) includes `<AudioToolbox/AudioToolbox.h>` and used AudioToolbox for AAC, so the Linux host never compiled it: its `HLE_FORCE` constructors were missing and the SDK built its own `movie::DecoderImpl`, which creates an Android `MediaCodec`/`ACodec` from `subsdk0`. That decoder wants nvdrv / NVDEC, which the host does not provide.
+- **Fix:** the AAC decoder is behind `dm/host/hle_movie_aac.h` (AudioToolbox implementation stays in `hle_movie.c` under `__APPLE__`), and `dm/host/hle_movie_ffmpeg.c` implements both interfaces over libavcodec on Linux: `mavc_*` (H.264: Annex B or `avcC` SPS/PPS as extradata, one access unit per packet, libavcodec's own B-frame reordering, NV12 or RGBA conversion into the client's buffer, `pkt_timebase` 1/1,000,000 so the packet times come back as the player scheduled them) and `maac_*` (AAC from the AudioSpecificConfig, any sample format to interleaved PCM16). `src/horizon/CMakeLists.txt` builds both files when the libavcodec/libavutil headers and libvpx are found (`NXNATIVE_MOVIES`, `NXNATIVE_AVCODEC_INCLUDE_DIR` / `_LIBRARY`, `NXNATIVE_AVUTIL_LIBRARY`, `NXNATIVE_VPX_LIBRARY`), and leaves movies out of the host otherwise.
+- **Check:** `ctest` and `python3 -m pytest dm/tools/tests -q`. Super Mario Odyssey plays its 480x272 H.264 hint films (`GetOutputBuffer` of 195,840 bytes = 480×272×1.5, `AcquireOutputBufferIndex` times advancing 33, 66, 100, 133 ms in presentation order).
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.0.0 (the hint films show in the loading corner and on the title path). Open: after about 43 s the game stops reading files and the main thread waits on a guest process-wide key with every job worker idle; that wait is not in the movie path (the decoder has pictures queued and the player has stopped asking).
+
 ### SDK 1 movie buffer getters
 
 - **Symptom:** constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`.

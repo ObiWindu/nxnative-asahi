@@ -7,7 +7,8 @@
 #include <vulkan/vulkan.h>
 
 typedef struct {
-    int arg_id;                 // SPIR-V / MSL argument-buffer binding number
+    int arg_id;                 // MSL argument-buffer id (matches the SPIR-V binding only when no support buffer shifts it)
+    char msl_name[40];          // the MSL argument's name, which the SPIR-V variable carries too
     char kind[24];              // DMSH_KIND_* ("cbuf", "tex", "samp", "sbuf", ...)
     int reg;                    // NVN slot or bank the kind uses
     int count;                  // array length, 0 when not an array
@@ -26,6 +27,7 @@ typedef struct {
     VkDescriptorType type;
     uint32_t count;             // 1 for non-arrays, 0 for runtime arrays
     int refl;                   // index into rb[], -1 when the JSON has no entry
+    char name[40];              // the SPIR-V variable name (route B names it after its MSL argument)
 } nvn_desc_bind;
 
 typedef struct {

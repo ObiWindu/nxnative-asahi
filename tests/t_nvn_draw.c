@@ -198,7 +198,7 @@ int main(void) {
     NVNF(nvnCommandBufferSetRenderTargets)(&cb, 1, visibility_color, NULL, NULL, NULL);
     float black[4] = {0, 0, 0, 1};
     NVNF(nvnCommandBufferClearColor)(&cb, 0, black, 0xf);
-    NVNF(nvnCommandBufferBindProgram)(&cb, &compute_prog, 0);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &compute_prog, NVN_SHADER_STAGE_COMPUTE_BIT);
     NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNimageHandle)1);
     NVNF(nvnCommandBufferDispatchCompute)(&cb, 1, 1, 1);
     NVNF(nvnCommandBufferBindProgram)(&cb, &vis_prog, 3);

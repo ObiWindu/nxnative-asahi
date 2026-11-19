@@ -8,8 +8,26 @@ games. The original nxnative games table is not a claim about this fork.
 - Apple M2 Pro, Fedora Asahi Remix 44, kernel `7.2.12-402.asahi.fc44.aarch64+16k`
   (16 KiB host pages).
 - Mesa 26.2.6 Honeykrisp, Vulkan 1.4.354.
-- No game files were available in the development environment. The tests below
-  use synthetic data and real GPU/audio workloads.
+- First real game: **Picross S GENESIS & Master System edition**
+  (`010089701567A000`, v1.0.0, Unity), legally supplied and prepared locally
+  with `scripts/build_asahi_from_nsp.py`. In a headless session it initializes
+  the SDK, mounts its RomFS, opens its audio output, runs its main loop at
+  60 fps (16.7 ms p50 over thousands of frames) and presents frames whose
+  pixels were read back with `NX_VK_PRESENT_DUMP`: the title screen
+  ("PICROSS — GENESIS & Master System edition", "Press Any Button") renders
+  correctly and its background animates. Scripted input (`DM_KEYS`) drives it
+  through the Main Menu, the Picross puzzle list, the "Play this puzzle?"
+  dialog and into the puzzle itself, whose board, clues, timer and Hint
+  Roulette prompt render correctly. Frame time is p50 16.7 ms on the title and
+  in the puzzle scene with the replay's batching (one command buffer per NVN
+  submission, persistent render passes, lookup tables, and uploads only when
+  the range was flushed since). A real window surface, a physical controller,
+  audible audio and save writes are not yet verified. **Super Mario Odyssey**
+  1.0.0 also boots headless, renders its intro (about 18-21 ms a frame) and
+  plays its H.264 hint films through the host's libavcodec-backed movie
+  library, but stops on its loading screen and has not reached the title.
+  Everything else below was verified with synthetic data and real GPU/audio
+  workloads.
 
 ## Status vocabulary
 
@@ -32,21 +50,21 @@ games. The original nxnative games table is not a claim about this fork.
 | Guest loader / relocations | Implemented | Synthetic NSO: MOD0, dynamic section, symbols, `DT_INIT`, relocations |
 | pthread TSD compatibility | Implemented | Runtime discovery of glibc's 16-byte TSD slots; the key page holds byte offsets |
 | Native AArch64 execution | Implemented | Synthetic guest enters `nnMain` and exits 0 |
-| Gates/SVCs | Incomplete | ELF gate path compiles; a real rewritten game has not been run |
-| Horizon threads/events/sync | Compiles, not functionally verified | Portable Linux fallbacks; no game workload |
-| Horizon memory SVCs | Compiles, not functionally verified | 16 KiB host handling; real game allocation patterns not tested |
-| FS / transactional saves | Compiles, not functionally verified | `FICLONE`/`copy_file_range` + `renameat2(RENAME_EXCHANGE)`; launcher backup/delete tested only as commands |
-| HID service | Incomplete | SDL3 keyboard and one gamepad fed into HID; multiple controllers, motion and rumble remain |
+| Gates/SVCs | Implemented | The ELF gate path runs a real rewritten game: main, subsdk0 and sdk load, relocate, initialize and enter `nnMain` (Picross S) |
+| Horizon threads/events/sync | Partial | A real game creates and runs ~33 guest worker threads with its own queues and events (Picross S, 60 fps headless); timed waits, cancellation and long-session behavior are not verified |
+| Horizon memory SVCs | Partial | A real game's allocation pattern is served: 1.5 GB application pool, alias region growth, `MapPhysicalMemory` and 4 KiB guest pages on 16 KiB host pages (Picross S); exhaustion and fragmentation behavior are not verified |
+| FS / transactional saves | Partial | A real game reads its 701-entry RomFS image and opens its save; transactional replacement and crash safety are not verified with a game |
+| HID service | Incomplete | SDL3 keyboard and one gamepad fed into HID; the headless game run does not exercise input. Multiple controllers, motion and rumble remain |
 | Audio (`AudioOut`, `OutputStream`) | Implemented | SDL3/PipeWire/ALSA sink with timed silent fallback; open/start/stop/append/release/volume tested |
 | Audio input | Not implemented | No microphone; opens fail cleanly |
-| Video/movies | Not implemented | VideoToolbox/VideoDecoder paths are not linked; dav1d/libvpx staged |
+| Video/movies | Partial | The host's `movie::Decoder` take-over builds on Linux and decodes H.264 and AAC through libavcodec (H.264 NV12/RGBA and PCM16, presentation order, output format keys), and VP8/VP9 through the bundled libvpx; Super Mario Odyssey's hint films play. Audio tracks, seeking and per-game format coverage are not verified |
 | Web applet | Not implemented | No WebKit replacement; the applet reports unavailable |
 | Software keyboard / controller applet | Not implemented | Return unavailable/failure |
 | Cheats | Not implemented | Host cheat service is not linked |
 | NVN interface layer | Implemented | 743 ELF entry points; 519 implemented; records preserved |
 | NVN→Vulkan core replay | Implemented | Pools, textures, samplers, render targets, clears, copies, fences, events, submission |
 | NVN shader path | Implemented (cache path) | Loads translated SPIR-V + reflection JSON from `b-<chain>`; translator, extractor and SPIRV-Cross are native AArch64 Linux binaries |
-| NVN draw path | Implemented (vertex/fragment) | Vertex attributes/streams/buffers, UBO/SSBO/texture/sampler/image descriptors, bindless handles read from the game's uniform buffers (`tex_ubo`/`samp_ubo`/`img_ubo`/`tbuf_ubo`), state, indexed/instanced draws, depth/stencil state, alpha test, logic operations, near=-w and near=0 depth modes; tested to guest readback |
+| NVN draw path | Implemented (vertex/fragment) | Vertex attributes/streams/buffers, UBO/SSBO/texture/sampler/image descriptors, bindless handles read from the game's uniform buffers (`tex_ubo`/`samp_ubo`/`img_ubo`/`tbuf_ubo`), state, indexed/instanced draws, depth/stencil state, alpha test, logic operations, near=-w and near=0 depth modes; tested to guest readback; a real Unity game renders its title screen (Picross S) through per-stage program binding, route-B reflection pairing and the support buffer |
 | NVN alpha test | Implemented | A discard test injected before each fragment return, with the alpha function and reference as pipeline specialization constants; tested with LESS/GREATER/ALWAYS/NEVER |
 | NVN advanced blend modes | Implemented (Porter-Duff) | ZERO/SRC/DST/SRC_OVER/DST_OVER/SRC_IN/DST_IN/SRC_OUT/DST_OUT/SRC_ATOP/DST_ATOP/XOR/PLUS use fixed-function factors, with the premultiplied-source and overlap rules; multiply/screen/overlay/HSL and the other shader-dependent modes fall back to the state's blend functions with a red line |
 | NVN logic operations | Implemented | Vulkan logic-op state, which takes the place of blending; tested with COPY/AND/OR/XOR/INVERT/COPY_INVERTED and with blending enabled |

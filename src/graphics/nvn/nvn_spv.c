@@ -17,7 +17,7 @@ enum {
     SPV_OP_ENTRY_POINT = 15, SPV_OP_TYPE_IMAGE = 25, SPV_OP_TYPE_SAMPLER = 26,
     SPV_OP_TYPE_SAMPLED_IMAGE = 27, SPV_OP_TYPE_ARRAY = 28, SPV_OP_TYPE_RUNTIME_ARRAY = 29,
     SPV_OP_TYPE_STRUCT = 30, SPV_OP_TYPE_POINTER = 32, SPV_OP_CONSTANT = 43,
-    SPV_OP_VARIABLE = 59, SPV_OP_DECORATE = 71,
+    SPV_OP_NAME = 5, SPV_OP_VARIABLE = 59, SPV_OP_DECORATE = 71,
     SPV_DEC_BLOCK = 2, SPV_DEC_BUFFER_BLOCK = 3, SPV_DEC_BINDING = 33, SPV_DEC_DESCRIPTOR_SET = 34,
     SPV_STORAGE_UNIFORM_CONSTANT = 0, SPV_STORAGE_UNIFORM = 2, SPV_STORAGE_PUSH_CONSTANT = 9,
     SPV_STORAGE_STORAGE_BUFFER = 12
@@ -188,6 +188,27 @@ static VkDescriptorType spv_descriptor(const spv_mod *m, uint32_t type_id, uint3
     return VK_DESCRIPTOR_TYPE_MAX_ENUM;
 }
 
+// The module's OpName for a variable: route B names each descriptor variable
+// after its MSL argument-buffer member ("vp_c4", "fp_t_tcb_8"), which is what
+// pairs the SPIR-V binding with the JSON reflection (arg ids shift when the
+// support buffer is not an argument member).
+static void spv_var_name(const spv_mod *m, uint32_t id, char *out, size_t n) {
+    out[0] = 0;
+    size_t i = 5;
+    while (i < m->n) {
+        uint32_t wc = m->words[i] >> 16, op = m->words[i] & 0xffff;
+        if (!wc || i + wc > m->n) break;
+        if (op == SPV_OP_NAME && wc >= 3 && m->words[i + 1] == id) {
+            const char *s = (const char *)&m->words[i + 2];
+            size_t len = strnlen(s, (size_t)(wc - 2) * 4);
+            if (len >= n) len = n - 1;
+            memcpy(out, s, len); out[len] = 0;
+            return;
+        }
+        i += wc;
+    }
+}
+
 static int spv_reflect(const spv_mod *m, nvn_desc_bind *out, int max) {
     int n = 0;
     size_t i = 5;
@@ -215,7 +236,9 @@ static int spv_reflect(const spv_mod *m, nvn_desc_bind *out, int max) {
                 uint32_t desc_set = set >= 0 ? (uint32_t)set : 0;
                 for (int j = 0; j < n; j++)
                     if (out[j].binding == (uint32_t)binding && out[j].set == desc_set) return -1;
-                out[n++] = (nvn_desc_bind){(uint32_t)binding, desc_set, dt, count, -1};
+                out[n] = (nvn_desc_bind){(uint32_t)binding, desc_set, dt, count, -1};
+                spv_var_name(m, id, out[n].name, sizeof out[n].name);
+                n++;
             }
         }
         i += wc;
@@ -371,7 +394,9 @@ static int shader_load_impl(const char *dir, const char *key, int geo, nvn_shade
                 for (size_t i = 0; i < bs->count && out->nrb < (int)(sizeof out->rb / sizeof *out->rb); i++) {
                     const nj_val *b = nj_at(bs, i);
                     nvn_refl_bind *r = &out->rb[out->nrb];
+                    memset(r, 0, sizeof *r);
                     r->arg_id = nj_int(nj_get(b, "arg_id"), -1);
+                    snprintf(r->msl_name, sizeof r->msl_name, "%s", nj_str(nj_get(b, "msl_name"), ""));
                     snprintf(r->kind, sizeof r->kind, "%s", nj_str(nj_get(b, "kind"), "?"));
                     r->reg = nj_int(nj_get(b, "reg"), -1);
                     r->count = nj_int(nj_get(b, "count"), 0);
@@ -413,9 +438,34 @@ static int shader_load_impl(const char *dir, const char *key, int geo, nvn_shade
         nj_arena_free(&arena);
         free(jt);
     }
-    for (int i = 0; i < out->ndesc; i++)
-        for (int j = 0; j < out->nrb; j++)
-            if (out->rb[j].arg_id == (int)out->desc[i].binding) { out->desc[i].refl = j; break; }
+    // Pair each SPIR-V binding with the JSON reflection entry that describes
+    // it: by the shader variable's name first (the JSON's msl_name, also
+    // without a combined sampler's "Smplr" suffix), then by the MSL argument
+    // id for shaders that carry no names (the tests) or older cache entries.
+    for (int i = 0; i < out->ndesc; i++) {
+        const char *nm = out->desc[i].name;
+        // The translator adds its support buffer to the shader's bindings; it
+        // has no JSON entry, and its binding number (0) collides with the
+        // game's first binding before the stage rebind, so an argument-id
+        // fallback paired it with that binding's reflection: the replay then
+        // bound the game's constant buffer (or a texture) where the shader
+        // reads the support buffer. Super Mario Odyssey's system-data compositor
+        // was the visible case (a flat colour instead of the scene).
+        if (!strcmp(nm, "support_buffer")) continue;
+        if (nm[0]) for (int j = 0; j < out->nrb && out->desc[i].refl < 0; j++) {
+            const char *mn = out->rb[j].msl_name;
+            if (!mn[0]) continue;
+            size_t ml = strlen(mn);
+            int smplr = ml > 5 && !strcmp(mn + ml - 5, "Smplr");
+            if (!strcmp(nm, mn) || (smplr && ml - 5 == strlen(nm) && !strncmp(nm, mn, ml - 5)))
+                out->desc[i].refl = j;
+        }
+        // A name that matches no JSON entry falls back to the argument id
+        // (synthetic test shaders carry names the JSON does not use).
+        if (out->desc[i].refl < 0)
+            for (int j = 0; j < out->nrb; j++)
+                if (out->rb[j].arg_id == (int)out->desc[i].binding) { out->desc[i].refl = j; break; }
+    }
     return 0;
 }
 

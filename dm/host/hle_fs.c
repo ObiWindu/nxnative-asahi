@@ -474,6 +474,13 @@ static int set_guest_name(const char *hp, const char *path) {
     const char *physical = strrchr(hp, '/') + 1;
     if (strcmp(physical, guest)) return fs_setxattr(hp, FS_GUEST_NAME, guest, strlen(guest), 0, XATTR_NOFOLLOW);
     if (!fs_removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == ENOATTR) return 0;
+#ifndef __APPLE__
+    // This path's physical and guest names are identical, so it has no
+    // collision alias to clear. Some Linux filesystems disable user xattrs;
+    // in that case there cannot be a stored alias, and ordinary save files
+    // must remain usable. Colliding names still require xattrs above.
+    if (errno == ENOTSUP || errno == EOPNOTSUPP) return 0;
+#endif
     return -1;
 }
 // Hosts before fwd_slashes took a backslash in a save path as part of the name: save:\savedata0.bin is the file "\savedata0.bin", and save:\dir\f the file "\dir\f" in the save's root.

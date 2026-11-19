@@ -670,6 +670,30 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_nvn_drawtex` fills a 4×4 source through a buffer copy and checks a full stretch, a scissored destination rectangle, a mirrored destination rectangle, a red-only channel mask and a source sub-region, reading every destination pixel.
 - **Found on:** the synthetic test; no game data was available.
 
+### A texture-view cache that linked an entry to itself on the Vulkan replay
+
+- **Symptom:** the game stops presenting (or freezes on a loading screen) with every guest job worker idle, and the replay thread is inside `cached_view`; a guest thread in `nvnTextureFinalize` waits on the replay lock behind it.
+- **Cause:** the view cache's hash table is grown by a rebuild that walks the entries already in `g_tviews`. The first insertion had already counted the new entry (`&g_tviews[g_ntv++]`) and written it before the rebuild ran, so the rebuild linked it, and the insert that followed linked it again at its own bucket head: `hnext` pointed at the entry itself and the chain walk never ended. The texture serial hash had the same shape, fixed by growing the table before an entry is marked live (`tex_hash_ensure`).
+- **Fix:** `tv_hash_ensure` in `src/graphics/nvn/nvn_vk_draw.inc` grows the table before the new entry is written; `tv_hash_add` only links it afterwards.
+- **Check:** `ctest` (43 tests); Super Mario Odyssey runs past its intro into the loading screen and plays its hint film.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.0.0: the hang began at the first swizzled or format-twin view after the intro.
+
+### The translator's support buffer paired with a game binding on the Vulkan replay
+
+- **Symptom:** a full-screen system-data pass (the last composite before present) drew a flat colour or an unchanged target instead of the composed scene, while the scene target itself held correct geometry; Super Mario Odyssey's intro clouds came out blurred and undetailed.
+- **Cause:** the translator adds a `support_buffer` binding to every shader that needs it, with SPIR-V binding 0, and the JSON reflection has no entry for it. `shader_load_impl` in `src/graphics/nvn/nvn_spv.c` paired a binding whose name matched no JSON `msl_name` by its argument id, and the support buffer's binding number (0 before the per-stage rebind) collided with the game's first binding: the support buffer was bound with the game's constant buffer, and in pixel stages the game's texture was written into the support buffer's uniform-buffer descriptor (an invalid descriptor, so the shader read whatever the driver left there). The game binding itself still matched by name.
+- **Fix:** a binding named `support_buffer` is left without a reflection entry (the replay already recognises it by that name and binds the shared 64 KB support buffer); every other binding keeps the name match and the argument-id fallback.
+- **Check:** `ctest` (43 tests) and `python3 -m pytest dm/tools/tests -q` (the argument-id fallback is still exercised by the synthetic shaders, whose SPIR-V names do not match the JSON's).
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) 1.0.0: program 264 (an `alProgramShader` system-data composite) had both its support buffer and its `vp_c3` constant buffer paired with the same JSON entry; the same mispairing hit the pixel stages of the HDR compose (14061) and `alTechniquePfx` (28158), where a texture was written into the support buffer's uniform-buffer descriptor.
+
+### NVN replay submissions, render passes and texture tables on the Vulkan replay
+
+- **Symptom:** Super Mario Odyssey's title scene took 140 ms a frame (about 7 fps) once its first geometry appeared, and an earlier version crashed with SIGSEGV in `vkCmdEndRenderPass`/`tex_find`; smaller titles were CPU-bound in the replay too (Picross S: 42 ms a frame for one scene).
+- **Cause:** the replay ended, submitted and waited every NVN operation, created a render pass and framebuffer per draw, emitted a full pipeline barrier per sampled image per draw, walked every texture and registered id ever seen to resolve bindings (two linear tables of 20,000 and 6,000 entries), and uploaded every CPU-backed texture at every draw. Measured on the Asahi host: 45 ms a frame of texture uploads, 15 ms of texture lookup, 10 ms of staging allocations, and 15.5 ms per `vkQueueSubmit` (Honeykrisp processes the recorded command list at submit).
+- **Fix:** `src/graphics/nvn/nvn_vk.c` and `src/graphics/nvn/nvn_vk_draw.inc` now (1) record every operation of one NVN submission into one command buffer, submit asynchronously and wait only where the CPU needs the GPU's results; (2) defer commit points so consecutive NVN command lists join one submission until a present, a readback or a wait ends the batch; (3) keep one render pass open across consecutive draws with the same attachments (closed on a target change, before a copy/clear/dispatch, and at submit) and create its framebuffer once; (4) emit a sampled-image barrier only when the texture was written since its last read or its layout changes; (5) look textures up in a serial hash with a free list, registered ids in hashes over fixed tables, and texture views in a hash with an LRU bound; (6) upload a CPU-written texture only when its range was flushed since the upload (`nvn_flush_stamp` in `hle_nvn.c`); (7) reuse scratch arrays, skip repeated pipeline/viewport/scissor/stencil/buffer binds, and defer destroyed textures' images/views to the batch that may still use them. The buffer and image copies a wait needs (`sub_flush`) are unchanged.
+- **Check:** `ctest` (43 tests, including `t_nvn_copy`, `t_nvn_texture`, `t_nvn_vk`, `t_nvn_indexed`, `t_nvn_compute*`) and `python3 -m pytest dm/tools/tests -q`.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md): the title scene went from 140 ms to about 21 ms a frame, with the GPU itself at 9.7 ms; Picross S held 60 fps at 0.3 ms of encode. Open: the CPU encode (about 11.5 ms) plus the GPU work the game waits for (about 7 ms) still exceeds one 16.7 ms vsync period at the title, and the composite shows a flat colour instead of the scene.
+
 ### A depth clear over the whole target with a partial stencil mask
 
 - **Symptom:** a pass loads a whole depth/stencil target every frame only to clear it: Donkey Kong Bananza clears a 2880x1620 Depth32F-S8 target with stencil mask `0x1`, before any pass is open, and loads 22.8 MB a frame for it.
@@ -1153,6 +1177,37 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `bind_vbufs` reports the first stream the vertex shader reads (`vs_streams`, from its reflection) that is in no pool, after binding the others. The draw is skipped with the red line, as for an index buffer in no pool, and so are a transform feedback capture and the vertex dump; a pulling pipeline's layout gives the stream's attributes zeros. A geometry capture shares its encoder with the job's later stages, which read what it writes, so it runs with the red line and the old binding. A stale address on a stream no input reads changes nothing. Not a fix for the address itself: the red line is there to find which pool the host missed.
 - **Found on:** no game has shown the line. The S2Arm project reported the stale binding on its copy of this layer. `t_vbuf` checks that a read stream in no pool is reported and the others still bound, and that an unread one is not.
 
+### Uniform buffer slots in the Vulkan replay
+
+- **Symptom:** every 3D and UI draw renders nothing (the frame stays the camera's clear colour) with no red line; the vertex transforms collapse or land off screen.
+- **Cause:** the reflection JSON names a uniform buffer's NVN slot in `reg` (`c[3]` is slot 0, the index `nvnCommandBufferBindUniformBuffer` takes), but the Vulkan replay subtracted 3 again, looked in slot -2, and bound a 16-byte zero block for every `cbuf`. `t_nvn_texture` had been written to the wrong convention (`reg 3` with slot 0), which hid it.
+- **Fix:** `cbuf` uses `reg` as the slot (both the graphics and compute descriptor paths). The test now binds slot 1 and its JSON says `reg 1`, so the old subtraction fails it.
+- **Check:** `t_nvn_texture` samples through a uniform buffer bound at slot 1; on Picross S the fix, together with per-stage program binding, produced the first rendered game frame.
+- **Found on:** [Picross S GENESIS & Master System edition](../../docs/COMPATIBILITY.md) (title `010089701567A000`, v1.0.0), Unity, on M2 Pro Honeykrisp.
+
+### Route B reflection is paired by shader variable name
+
+- **Symptom:** `[RED] shader <key> binding N has no reflection entry`, repeated for every draw; nothing renders.
+- **Cause:** route B's JSON lists argument-buffer members with the MSL id in `arg_id`, and every shader's SPIR-V also declares the translator's `support_buffer` at binding 0, which the JSON often omits. `arg_id` therefore equals the SPIR-V binding only for shaders where the support buffer is a member. Pairing by `arg_id == binding` left real shaders' bindings unpaired.
+- **Fix:** `nvn_spv.c` records each descriptor variable's `OpName` and pairs it with the JSON entry of the same `msl_name` (also with a combined sampler's `Smplr` suffix removed); `arg_id == binding` remains the fallback for tests and older caches. A binding named `support_buffer` (or whose JSON kind is `support`) is bound to one 64 KB uniform buffer filled like the Metal host's: zeros with `render_scale = 1` at byte 192 + 16·i for i in 0..72 (Ryujinx's layout).
+- **Check:** the real-game runs above; every shader this game uses with a UBO now pairs and draws. Synthetic tests keep using `arg_id`.
+- **Found on:** [Picross S GENESIS & Master System edition](../../docs/COMPATIBILITY.md).
+
+### D24 and D24S8 have no Vulkan format on Apple GPUs
+
+- **Symptom:** `[RED] [nvn/vk] texture format 53 (Vulkan format 129) lacks … support on this device; its textures are dropped` for `NVN_FORMAT_DEPTH24_STENCIL8`, and passes with a depth attachment are skipped.
+- **Cause:** Honeykrisp reports no features at all for `VK_FORMAT_D24_UNORM_S8_UINT` or `VK_FORMAT_X8_D24_UNORM_PACK32`; Apple GPUs have no 24-bit depth format (the Metal host substitutes the same way).
+- **Fix:** `nvn_depth_format` in `nvn_vk_draw.inc` queries the device and maps NVN `DEPTH24` / `DEPTH24_STENCIL8` to `D32_SFLOAT` / `D32_SFLOAT_S8_UINT` when the 24-bit format is unusable. As a render target this is a precision upgrade with identical comparisons; depth bytes are never handed to the guest (depth/stencil buffer copies are refused), so the storage difference does not leak.
+- **Check:** the depth tests and the real game run (its passes bind `depth 130`, `D32_SFLOAT_S8_UINT`).
+- **Found on:** [Picross S GENESIS & Master System edition](../../docs/COMPATIBILITY.md).
+
+### Readback frames without a window
+
+- **Cause:** the Vulkan path's presentation has no surface in a headless session, and there was no way to see what it rendered, so a game could look alive while drawing nothing.
+- **Fix:** `NX_VK_PRESENT_DUMP=<dir>[:<count>[:<every>]]` writes the first `count` presented frames (multiples of `every`, default 3 and 1) as PPM, read through `mtl_read_texels` in the texture's own 8-bit format, with the rows flipped for a lower-left window origin.
+- **Check:** the Picross S title screen ("PICROSS — GENESIS & Master System edition", "Press Any Button") is visible in frames dumped this way.
+- **Found on:** [Picross S GENESIS & Master System edition](../../docs/COMPATIBILITY.md).
+
 ### Programs bound per stage
 
 - **Symptom:** scenes and characters black, only foliage, light shafts and the HUD drawn; pass dumps full of `Z … draw skipped: no program bound`.
@@ -1160,6 +1215,9 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the replay tracks the program per stage (`bind_stages` in `nvn_mtl.m`). When the stages come from different programs, or the fragment stage is unbound, it builds a composite program, which gives a vertex-only pipeline for the prepass. Games that always bind every stage from one program (Mario, Engage) are unchanged.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md): the combinations it uses are (program, 0x3), (null, 0x2), (null, 0x7). [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) builds one program per GLSLC output and pairs them only through these composites ([Single-stage programs paired with a cover](shaders.md#single-stage-programs-paired-with-a-cover)).
 - **Note:** pass dumps print a `Z` line wherever a draw is dropped (no program, no pipeline, empty scissor, both faces culled, no render pass). That is how this one was found: 144 `Z … draw skipped: no program bound` lines in a frame whose G-buffer pass had draws but stayed black.
+- **Vulkan replay:** `OP_BIND_PROGRAM` fills `g_bound_stage[6]` (five graphics stages and compute) from the bind's stage bits, and `pvk_get_stages` builds one combined `prog_vk` per combination of bound programs, keyed by their serials. A null program unbinds only the stages its mask names. Compute stays in slot 5, so a dispatch after a graphics bind and a draw after a dispatch each find their own program.
+- **Lifetime:** the queue frees the object snapshots it took for a submission when that submission completes, but NVN state (render targets and per-stage programs) outlives it. The replay keeps its own copies (`g_rt_color_copy`, `g_rt_depth_copy`, `g_bound_prog_copy`) and points its state at them; without that, the second frame of a game read freed memory and cleared a garbage texture object (logged as `texture format -N is not mapped`, serial `~0`).
+- **Check:** `t_nvn_stage_bind` sets one program with only a vertex shader and another with only a fragment shader, binds them with `NVN_SHADER_STAGE_VERTEX_BIT` and `NVN_SHADER_STAGE_FRAGMENT_BIT`, and reads the drawn triangle back. On Picross S the same fix turned a cleared blue frame into its rendered title screen.
 
 ### Conditional rendering survives queue continuations
 

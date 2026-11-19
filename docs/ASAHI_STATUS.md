@@ -2,8 +2,70 @@
 
 This is the current, tested state of the native Asahi Linux/AArch64 port. Every
 claim below names the test or the code path that proves it. Nothing here is
-"complete emulator" language: no retail or homebrew game was available in the
-development environment, so the first real game bring-up is still open.
+"complete emulator" language: one retail game has been brought up to its
+rendered title screen, and the rest of the game surface is still under test.
+
+## First real game
+
+**Picross S GENESIS & Master System edition** (`010089701567A000`, v1.0.0,
+Unity), legally supplied and prepared with `scripts/build_asahi_from_nsp.py`:
+542 shaders built, main/subsdk0/sdk rewritten, then a headless run on the
+reference machine.
+
+Verified milestones, with the evidence:
+
+1. Extraction: ExeFS (5 files, 30.7 MB) and RomFS.img (681 files, 139.3 MB,
+   701 entries) from the game's NSP.
+2. Rewrite and shader build: all modules patched, 542/542 shaders translated
+   to SPIR-V.
+3. Native execution: the three modules load, relocate (main: 277,479 relative,
+   1,277 absolute, 805 jump relocations), run their `DT_INIT` arrays and enter
+   `nnMain`; the SDK initializes, RomFS mounts and the SDL3 audio output opens.
+4. Main loop: sustained at 60 fps (frame time p50 16.67 ms, p95 16.7 ms over
+   more than 14,000 frames in a headless session).
+5. Rendering and presentation: draws target the window's swapchain textures
+   (1920x1080 RGBA8 with a D32S8 depth attachment) and the presented frames,
+   read back with `NX_VK_PRESENT_DUMP`, show the title screen ("PICROSS —
+   GENESIS & Master System edition", "Press Any Button") with its animated
+   background.
+6. Input: scripted input (`DM_KEYS`) presses A at the title, then confirms
+   through the Main Menu and the Picross puzzle list, opens "Play this
+   puzzle?" and enters the puzzle, where the board, its clues, the timer and
+   the Hint Roulette prompt render correctly.
+
+Frame time is p50 16.7 ms on the title and in the puzzle scene, with the
+replay's submissions batched (one command buffer per NVN submission, one
+render pass across consecutive draws, hash tables for the texture, view and
+registered-id lookups, and CPU textures uploaded only when their range was
+flushed since): the encode time that dominated before is 0.3 ms.
+
+## Second game and the movie library
+
+**Super Mario Odyssey** 1.0.0 (`0100000000010000`) boots headless on the same
+host: its modules relocate and enter `nnMain`, it creates its 1600x900 swap
+chain and Vulkan device, renders the intro's cloudscape and airship, and then
+stops on its loading screen, where it plays its 480x272 H.264 hint films (the
+frames are decoded by the host and visible in `NX_VK_PRESENT_DUMP` readback).
+The same batching work took its first 3D scene from 140 ms a frame to about
+18-21 ms (p50, 300-frame windows) with no crash over repeated multi-minute
+runs. The host's `movie::Decoder` take-over is built on Linux for this: H.264
+and AAC through libavcodec (`hle_movie_ffmpeg.c`), with the AAC decoder behind
+`hle_movie_aac.h` so the Apple build keeps AudioToolbox.
+
+Open on this game: after about 43 s it stops reading files and its main thread
+waits on a guest process-wide key while every job worker is idle, so it does
+not reach the title; the present on that loading screen is a flat picture while
+the 1600x900 scene target still holds rendered content; and 60 fps needs about
+1.5-2 ms more in that scene.
+
+Not yet verified: a real Wayland/X11 window and its swapchain, a physical
+controller, audible audio on a live device, save writes, long-session
+stability, and a game past its loading screen.
+
+### Until then, the synthetic suite proves
+
+The same claim discipline applies to everything the tests cover; see
+[COMPATIBILITY.md](COMPATIBILITY.md) for the per-subsystem matrix.
 
 ## Working now
 

@@ -4,14 +4,18 @@
 #include "hle.h"
 #include <arm_neon.h>
 #include <mach/mach.h>
+#include <pthread/qos.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
-#include "hle_movie_avc.h"   // H.264 on VideoToolbox
+#include "hle_movie_avc.h"   // H.264: VideoToolbox on Apple, libavcodec on Linux (hle_movie_ffmpeg.c)
 #include "hle_movie_yuv.h"   // md_nv12 / md_rgba, shared with hle_codec_video.c
+#include "hle_movie_aac.h"   // AAC: AudioToolbox here on Apple, libavcodec on Linux
+#ifdef __APPLE__
 #include <AudioToolbox/AudioToolbox.h>   // AAC
+#endif
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
 #define STB_VORBIS_NO_PULLDATA_API
@@ -92,8 +96,8 @@ typedef struct {
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
     int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the last packet's blocksize, 0 at a stream's start (md_vorbis)
-    // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
-    AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
+    // AAC (Monster Hunter Rise's movies): opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0])
+    maac *aac;
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
     unsigned long ncall[24];
 } mdec_t;
@@ -422,16 +426,47 @@ static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
     return md_vorbis_emit(d, slot, (size_t)((prev + cur) / 4) * ch);
 }
 // ---------- AAC ----------
-// The demuxer hands over raw AAC frames (1024 samples each) and the AudioSpecificConfig in csd-0. AudioToolbox takes the configuration as an MPEG-4 ES descriptor (the magic cookie built
-// here as FFmpeg's AudioToolbox decoder builds it); without csd-0 an AAC-LC configuration is made from the sample rate and channel count
+// The demuxer hands over raw AAC frames (1024 samples each) and the AudioSpecificConfig in csd-0. On Apple, AudioToolbox takes the configuration as an MPEG-4 ES descriptor (the magic
+// cookie built here as FFmpeg's AudioToolbox decoder builds it). On Linux the same interface is implemented over libavcodec's AAC decoder in hle_movie_ffmpeg.c.
+#ifdef __APPLE__
+struct maac { AudioConverterRef c; int ch, rate; const uint8_t *pkt; UInt32 pkt_n; AudioStreamPacketDescription desc; };
 static uint8_t *esds_descr(uint8_t *p, int tag, unsigned n) { *p++ = (uint8_t)tag; for (int i = 3; i > 0; i--) *p++ = (uint8_t)(n >> (7 * i) | 0x80); *p++ = (uint8_t)(n & 0x7f); return p; }
 static OSStatus aac_feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, AudioStreamPacketDescription **pd, void *ud) {
-    (void)c; mdec_t *d = ud;
-    if (!d->aac_pkt) { *np = 0; return 1; }   // this packet is used up: a non-zero status ends the fill with what was decoded
-    bl->mNumberBuffers = 1; bl->mBuffers[0].mData = (void *)d->aac_pkt; bl->mBuffers[0].mDataByteSize = d->aac_pkt_n; bl->mBuffers[0].mNumberChannels = (UInt32)d->ch;
-    d->aac_desc = (AudioStreamPacketDescription){0, 0, d->aac_pkt_n}; if (pd) *pd = &d->aac_desc;
-    *np = 1; d->aac_pkt = NULL; return 0;
+    (void)c; maac *a = ud;
+    if (!a->pkt) { *np = 0; return 1; }   // this packet is used up: a non-zero status ends the fill with what was decoded
+    bl->mNumberBuffers = 1; bl->mBuffers[0].mData = (void *)a->pkt; bl->mBuffers[0].mDataByteSize = a->pkt_n; bl->mBuffers[0].mNumberChannels = (UInt32)a->ch;
+    a->desc = (AudioStreamPacketDescription){0, 0, a->pkt_n}; if (pd) *pd = &a->desc;
+    *np = 1; a->pkt = NULL; return 0;
 }
+maac *maac_new(int rate, int ch, const uint8_t *asc, int asc_n) {
+    maac *a = calloc(1, sizeof *a);
+    if (!a) return NULL;
+    a->ch = ch > 0 ? ch : 2; a->rate = rate > 0 ? rate : 48000;
+    AudioStreamBasicDescription in = {.mSampleRate = a->rate, .mFormatID = kAudioFormatMPEG4AAC, .mFramesPerPacket = 1024, .mChannelsPerFrame = (UInt32)a->ch};
+    AudioStreamBasicDescription out = {.mSampleRate = a->rate, .mFormatID = kAudioFormatLinearPCM, .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+                                       .mBytesPerPacket = 2u * a->ch, .mFramesPerPacket = 1, .mBytesPerFrame = 2u * a->ch, .mChannelsPerFrame = (UInt32)a->ch, .mBitsPerChannel = 16};
+    if (AudioConverterNew(&in, &out, &a->c)) { free(a); return NULL; }
+    uint8_t ck[128], *p = ck;
+    p = esds_descr(p, 3, 3 + 5 + 13 + 5 + (unsigned)asc_n); *p++ = 0; *p++ = 0; *p++ = 0;   // ES descriptor: ES ID 0, no flags
+    p = esds_descr(p, 4, 13 + 5 + (unsigned)asc_n); *p++ = 0x40; *p++ = 0x15; memset(p, 0, 11); p += 11;   // decoder configuration: MPEG-4 audio, audio stream; buffer size and bit rates 0
+    p = esds_descr(p, 5, (unsigned)asc_n); if (asc_n > 0) memcpy(p, asc, (size_t)asc_n); p += asc_n;
+    if (AudioConverterSetProperty(a->c, kAudioConverterDecompressionMagicCookie, (UInt32)(p - ck), ck)) { AudioConverterDispose(a->c); free(a); return NULL; }
+    return a;
+}
+void maac_free(maac *a) { if (!a) return; if (a->c) AudioConverterDispose(a->c); free(a); }
+int maac_decode(maac *a, const uint8_t *p, int n, int16_t *out, int max_frames) {
+    if (!a || n <= 0) return 0;
+    a->pkt = p; a->pkt_n = (UInt32)n;
+    UInt32 frames = (UInt32)max_frames;
+    AudioBufferList ob = {1, {{(UInt32)a->ch, frames * 2u * a->ch, out}}};
+    OSStatus st = AudioConverterFillComplexBuffer(a->c, aac_feed, a, &frames, &ob, NULL);
+    a->pkt = NULL;
+    if (st && st != 1) { static int red; if (!red++) LOG("[RED] movie: AAC decode error (AudioToolbox %d, first case)", (int)st); }
+    return (int)frames;
+}
+#endif
+
+// The AAC decoder, opened at the first packet: rate and channels from the AudioSpecificConfig when it carries them, else the values Configure gave
 static int md_aac_open(mdec_t *d) {
     static const int rates[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350};
     uint8_t asc[64]; int an = d->vhdr_n[0] > 0 && d->vhdr_n[0] <= (int)sizeof asc ? d->vhdr_n[0] : 0;
@@ -442,31 +477,17 @@ static int md_aac_open(mdec_t *d) {
     }
     if (d->rate <= 0) d->rate = 48000; if (d->ch <= 0) d->ch = 2;
     if (!an) { int fi = 3; for (int i = 0; i < 13; i++) if (rates[i] == d->rate) fi = i; asc[0] = (uint8_t)(2 << 3 | fi >> 1); asc[1] = (uint8_t)((fi & 1) << 7 | (d->ch & 15) << 3); an = 2; }
-    AudioStreamBasicDescription in = {.mSampleRate = d->rate, .mFormatID = kAudioFormatMPEG4AAC, .mFramesPerPacket = 1024, .mChannelsPerFrame = (UInt32)d->ch};
-    AudioStreamBasicDescription out = {.mSampleRate = d->rate, .mFormatID = kAudioFormatLinearPCM, .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
-                                       .mBytesPerPacket = 2u * d->ch, .mFramesPerPacket = 1, .mBytesPerFrame = 2u * d->ch, .mChannelsPerFrame = (UInt32)d->ch, .mBitsPerChannel = 16};
-    OSStatus st = AudioConverterNew(&in, &out, &d->aac);
-    if (st) { if (!d->red_vb++) LOG("[RED] movie: AudioToolbox cannot create an AAC decoder (%d; %d channels %d Hz), outputting silence", (int)st, d->ch, d->rate); d->aac = NULL; return 0; }
-    uint8_t ck[128], *p = ck;
-    p = esds_descr(p, 3, 3 + 5 + 13 + 5 + (unsigned)an); *p++ = 0; *p++ = 0; *p++ = 0;   // ES descriptor: ES ID 0, no flags
-    p = esds_descr(p, 4, 13 + 5 + (unsigned)an); *p++ = 0x40; *p++ = 0x15; memset(p, 0, 11); p += 11;   // decoder configuration: MPEG-4 audio, audio stream; buffer size and bit rates 0
-    p = esds_descr(p, 5, (unsigned)an); memcpy(p, asc, (size_t)an); p += an;
-    st = AudioConverterSetProperty(d->aac, kAudioConverterDecompressionMagicCookie, (UInt32)(p - ck), ck);
-    if (st && !d->red_vb++) LOG("[RED] movie: AAC configuration not accepted by AudioToolbox (%d)", (int)st);
+    d->aac = maac_new(d->rate, d->ch, asc, an);
+    if (!d->aac) { if (!d->red_vb++) LOG("[RED] movie: no AAC decoder for %d channels %d Hz, outputting silence", d->ch, d->rate); return 0; }
     LOG("[movie] AAC: %d channels %d Hz, AudioSpecificConfig %d bytes (object type %d)", d->ch, d->rate, an, asc[0] >> 3);
     return 1;
 }
-// one packet → PCM16 interleaved in the slot; 1 when there are samples (the decoder's start-up delay may give none for the first packet)
+// one packet -> PCM16 interleaved in the slot; 1 when there are samples (the decoder's start-up delay may give none for the first packet)
 static int md_aac(mdec_t *d, const uint8_t *p, int n, int slot) {
     if (!d->aac && !md_aac_open(d)) return 0;
     if (n <= 0) return 0;
     if (d->out[slot].cap < MD_PCM_CAP) { free(d->out[slot].frm); d->out[slot].frm = malloc(MD_PCM_CAP); d->out[slot].cap = MD_PCM_CAP; }
-    d->aac_pkt = p; d->aac_pkt_n = (UInt32)n;
-    UInt32 frames = (UInt32)(MD_PCM_CAP / (2 * d->ch));
-    AudioBufferList ob = {1, {{(UInt32)d->ch, frames * 2u * d->ch, d->out[slot].frm}}};
-    OSStatus st = AudioConverterFillComplexBuffer(d->aac, aac_feed, d, &frames, &ob, NULL);
-    d->aac_pkt = NULL;
-    if (st && st != 1 && !d->red_dec++) LOG("[RED] movie: AAC decode error (AudioToolbox %d, first case)", (int)st);
+    int frames = maac_decode(d->aac, p, n, (int16_t *)d->out[slot].frm, (int)(MD_PCM_CAP / (2 * d->ch)));
     d->out[slot].bytes = (size_t)frames * 2 * d->ch;
     return frames > 0;
 }
@@ -482,7 +503,7 @@ static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int take_only) {
     if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
     return mavc_take(d->avc, d->jflush, d->out[slot].frm, d->w, d->h, &d->jpts_out);
 }
-static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { AudioConverterDispose(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
+static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } if (d->aac) { maac_free(d->aac); d->aac = NULL; } if (d->avc) { mavc_free(d->avc); d->avc = NULL; } }
 void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
 static void *md_worker(void *arg) {
     mdec_t *d = arg;

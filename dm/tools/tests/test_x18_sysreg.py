@@ -64,6 +64,17 @@ class StaticShape(unittest.TestCase):
         ins = list(md.disasm(block(MRS_TPIDR | 0), PATCH_BASE))
         self.assertEqual([f'{i.mnemonic} {i.op_str}' for i in ins][:2], ['stur x16, [sp, #-0x10]', 'mrs x0, tpidrro_el0'])
 
+    def test_linux_host_slots_use_tpidr_el0(self):
+        import os
+        old = os.environ.get('DM_REWRITE_PLATFORM')
+        os.environ['DM_REWRITE_PLATFORM'] = 'linux'
+        try:
+            ins = list(md.disasm(block(MRS_TPIDRRO | 0), PATCH_BASE))
+        finally:
+            if old is None: os.environ.pop('DM_REWRITE_PLATFORM', None)
+            else: os.environ['DM_REWRITE_PLATFORM'] = old
+        self.assertEqual((ins[1].mnemonic, ins[1].op_str), ('mrs', 'x0, tpidr_el0'))
+
 
 @unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
 class Run(unittest.TestCase):

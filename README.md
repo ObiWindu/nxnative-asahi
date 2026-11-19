@@ -184,6 +184,11 @@ Or start the graphical launcher:
 NXNATIVE_GAMES_DIR=<folder of prepared games> build/nxnative-launcher
 ```
 
+The keyboard is player 1: `WASD` the left stick, `IJKL` the right stick, `Space`
+or `Z` A, `X` B, `C` X, `V` Y, `Q`/`E` L/R, `1`/`2` ZL/ZR, `Enter` +
+(`Backspace` −) and the arrows the D-pad ([Keyboard controls](docs/TROUBLESHOOTING.md#keyboard-controls)).
+A prepared game's `run.sh` takes the module names, e.g. `./run.sh main subsdk0 sdk`.
+
 The launcher writes per-game settings under `$XDG_CONFIG_HOME/nxnative/launcher`
 and launches with `DM_ROMFS`, `DM_SAVE`, `DM_TEMP`, the game's shader directory
 and any per-game `nxnative.env` overrides.

@@ -30,7 +30,21 @@ static int nq_snapshot_object(void *ctx,int kind,uint64_t *field,uint8_t *payloa
         size_t bytes=kind==CAP_K_PROG?sizeof(prog_t):sizeof(tex_t); o=calloc(1,sizeof *o+bytes); if(!o) die("queue descriptor allocation failed");
         o->kind=kind; o->next=j->owned; j->owned=o;
         if(kind==CAP_K_PROG) mtl_prog_snapshot((prog_t *)o->data,(const prog_t *)(uintptr_t)*field);
-        else { memcpy(o->data,(const void *)(uintptr_t)*field,bytes); mtl_tex_pin(((tex_t *)o->data)->serial); }
+        else {
+            memcpy(o->data,(const void *)(uintptr_t)*field,bytes); mtl_tex_pin(((tex_t *)o->data)->serial);
+            // The record carries its own copy of the texture object (hle_nvn.c tex_snap); this one is read at submit.
+            // A copy without the texture magic means that memory was reused or never held the object: say so once
+            // for each shape, with the bytes, rather than letting replay interpret them.
+            tex_t *cp = (tex_t *)o->data;
+            if (cp->magic != MAGIC('T', 'E', 'X', 0)) {
+                static int red; if (red++ < 8) {
+                    const uint64_t *q = (const uint64_t *)cp;
+                    LOG("[RED] submit: the recorded texture copy at %p is not a texture object (magic %#x, serial %llu, target %d, %ux%u, first words %llx %llx %llx %llx %llx %llx)",
+                        (const void *)(uintptr_t)*field, cp->magic, (unsigned long long)cp->serial, cp->d.target, cp->d.width, cp->d.height,
+                        (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]);
+                }
+            }
+        }
         nvn_hm_put(&j->objects,key,o);
     }
     *field=(uintptr_t)o->data;return 1;

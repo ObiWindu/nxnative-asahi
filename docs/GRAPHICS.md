@@ -180,7 +180,9 @@ driver. This is lower priority than Vulkan and is not in the current build.
 ## Diagnostics
 
 - `NX_VK_VALIDATION=1` enables the Khronos validation layer when installed.
-- `NX_VK_DEBUG=1` logs bound UBOs and each nonzero c0/c2 driver-bank register
+- `NX_VK_PRESENT_DUMP=<dir>[:<count>[:<every>]]` writes presented frames as
+  PPM (8-bit colour targets), the Vulkan path's screenshot for headless
+  bring-up; `NX_VK_DEBUG=1` logs bound UBOs and each nonzero c0/c2 driver-bank register
   with the shader key and stage, including GPU addresses, sizes and handles.
 - Set `NX_VK_SHADER_CAPTURE_DIR=/path/to/capture` when launching a direct
   Vulkan game to capture runtime shader modules. The layer writes each SPIR-V

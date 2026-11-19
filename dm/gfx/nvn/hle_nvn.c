@@ -573,8 +573,15 @@ static void ft_flush(const uint8_t *a, uint64_t n) {
 // texture from it once, as it does for a pool the CPU cannot access. Breath of the Wild copies its precomputed sky scattering tables (System/KSys/sky.skybin: a 256x32x16 RGBA16F 3D
 // texture and two 2D ones) into CPU_CACHED pools of their own with memcpy and flushes them (main+0x1257d50); as GPU textures of zeros the sky had no scattered light and came out
 // brownish grey instead of blue (GitHub issue #52). Textures the CPU keeps writing after their first use still need the profile's tex_flush_upload / tex_dirty_upload
-typedef struct { const uint8_t *lo, *hi; } fl_span;
+// Each span carries the serial of its newest flush: the Vulkan replay uploads a
+// texture's storage to its image and asks again on later uses whether the
+// range was flushed since, so a texture the CPU rewrote is re-uploaded and one
+// it did not is not (Super Mario Odyssey sampled about 600 textures a frame
+// and re-uploaded each one, 45 ms; NVN requires a flush after CPU writes for
+// the GPU to see them).
+typedef struct { const uint8_t *lo, *hi; uint64_t stamp; } fl_span;
 static fl_span *g_fl; static size_t g_nfl, g_cfl; static pthread_mutex_t g_fl_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_fl_serial;
 static size_t fl_find(const uint8_t *a, int touch) {   // the first span that ends after a (touch: or at a); g_fl_mu held
     size_t l = 0, h = g_nfl;
     while (l < h) { size_t m = (l + h) / 2; if (g_fl[m].hi < a || (!touch && g_fl[m].hi == a)) l = m + 1; else h = m; }
@@ -582,17 +589,31 @@ static size_t fl_find(const uint8_t *a, int touch) {   // the first span that en
 }
 static void fl_add(const uint8_t *a, uint64_t n) {
     if (!a || !n) return;
+    uint64_t st = atomic_fetch_add(&g_fl_serial, 1) + 1;
     const uint8_t *b = a + n;
     pthread_mutex_lock(&g_fl_mu);
     size_t i = fl_find(a, 1), j = i;
-    if (i < g_nfl && g_fl[i].lo <= a && b <= g_fl[i].hi) { pthread_mutex_unlock(&g_fl_mu); return; }   // already covered (a buffer flushed every frame)
+    if (i < g_nfl && g_fl[i].lo <= a && b <= g_fl[i].hi) {   // already covered (a buffer flushed every frame): its stamp still moves
+        if (g_fl[i].stamp < st) g_fl[i].stamp = st;
+        pthread_mutex_unlock(&g_fl_mu); return;
+    }
     while (j < g_nfl && g_fl[j].lo <= b) { if (g_fl[j].lo < a) a = g_fl[j].lo; if (g_fl[j].hi > b) b = g_fl[j].hi; j++; }   // spans i .. j-1 overlap or touch [a, b): merged into one
     if (i == j) {
         if (g_nfl == g_cfl && !(g_fl = realloc(g_fl, (g_cfl = g_cfl ? 2 * g_cfl : 256) * sizeof *g_fl))) die("flushed range allocation failed");
         memmove(g_fl + i + 1, g_fl + i, (g_nfl - i) * sizeof *g_fl); g_nfl++;
     } else if (j > i + 1) { memmove(g_fl + i + 1, g_fl + j, (g_nfl - j) * sizeof *g_fl); g_nfl -= j - i - 1; }
-    g_fl[i] = (fl_span){a, b};
+    g_fl[i] = (fl_span){a, b, st};
     pthread_mutex_unlock(&g_fl_mu);
+}
+// The newest serial of a flush overlapping [p, p + n), 0 if none did.
+uint64_t nvn_flush_stamp(const void *p, uint64_t n) {
+    if (!p || !n) return 0;
+    const uint8_t *a = p, *b = a + n; uint64_t st = 0;
+    pthread_mutex_lock(&g_fl_mu);
+    for (size_t i = fl_find(a, 0); i < g_nfl && g_fl[i].lo < b; i++)
+        if (g_fl[i].hi > a && g_fl[i].stamp > st) st = g_fl[i].stamp;
+    pthread_mutex_unlock(&g_fl_mu);
+    return st;
 }
 static void fl_drop(const uint8_t *a, uint64_t n) {   // a pool goes: its part of every span (spans of neighbouring pools may have merged with it)
     const uint8_t *b = a + n;
@@ -602,7 +623,7 @@ static void fl_drop(const uint8_t *a, uint64_t n) {   // a pool goes: its part o
         if (s.lo < a && s.hi > b) {   // the pool lies inside the span: split it
             if (g_nfl == g_cfl && !(g_fl = realloc(g_fl, (g_cfl = 2 * g_cfl) * sizeof *g_fl))) die("flushed range allocation failed");
             memmove(g_fl + i + 2, g_fl + i + 1, (g_nfl - i - 1) * sizeof *g_fl); g_nfl++;
-            g_fl[i].hi = a; g_fl[i + 1] = (fl_span){b, s.hi}; break;
+            g_fl[i].hi = a; g_fl[i + 1] = (fl_span){b, s.hi, s.stamp}; break;
         }
         if (s.lo < a) { g_fl[i].hi = a; i++; }
         else if (s.hi > b) { g_fl[i].lo = b; break; }
@@ -866,6 +887,45 @@ int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     memcpy(key, k->key[st], 8);
     return 1;
 }
+int prog_key_store(prog_t *p, unsigned st, const uint8_t key[8]) {
+    if (!p || !key || st >= 6) return 0;
+    if (!p->serial) {
+        memset(p, 0, sizeof *p);
+        p->magic = MAGIC('P', 'R', 'O', 'G');
+        p->nstage = 6;
+        p->serial = nvn_new_serial();
+    }
+    prog_keys_t *k = pk_get(p->serial);
+    memcpy(k->key[st], key, 8);
+    k->ok |= (uint8_t)(1u << st);
+    return 1;
+}
+void prog_key_forget(uint64_t serial) {
+    if (!serial) return;
+#ifdef __APPLE__
+    pthread_mutex_lock(&g_pk_mu);
+    prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, (const void *)(uintptr_t)serial) : NULL;
+    if (k) { CFDictionaryRemoveValue(g_pk, (const void *)(uintptr_t)serial); free(k); }
+    pthread_mutex_unlock(&g_pk_mu);
+#else
+    pthread_mutex_lock(&g_pk_mu);
+    size_t mask = g_pk_cap - 1;
+    size_t i = (size_t)(serial * 0x9E3779B97F4A7C15ull) & mask;
+    while (g_pk[i].k && g_pk[i].serial != serial) i = (i + 1) & mask;
+    if (g_pk[i].k) {
+        free(g_pk[i].k); memset(&g_pk[i], 0, sizeof g_pk[i]); g_pk_n--;
+        size_t hole = i, next = (hole + 1) & mask;
+        while (g_pk[next].k) {
+            size_t ideal = (size_t)(g_pk[next].serial * 0x9E3779B97F4A7C15ull) & mask;
+            if (((next - ideal) & mask) > ((hole - ideal) & mask)) {
+                g_pk[hole] = g_pk[next]; memset(&g_pk[next], 0, sizeof g_pk[next]); hole = next;
+            }
+            next = (next + 1) & mask;
+        }
+    }
+    pthread_mutex_unlock(&g_pk_mu);
+#endif
+}
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("[RED] ProgramSetShaders stage count %d", n); return 0; }
@@ -895,6 +955,15 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
+    // DM_NVN_PROGLOG=1: every program's stages, for bring-up of a program the
+    // replay sees with the wrong stage set (each call replaces all stages).
+    static int proglog = -1; if (proglog < 0) proglog = getenv("DM_NVN_PROGLOG") != NULL;
+    if (proglog) {
+        char k0[17] = "none", k1[17] = "none";
+        if (n > 0 && (k->ok & 1)) for (int j = 0; j < 8; j++) snprintf(k0 + 2 * j, 3, "%02x", k->key[0][j]);
+        if (n > 1 && (k->ok & 2)) for (int j = 0; j < 8; j++) snprintf(k1 + 2 * j, 3, "%02x", k->key[1][j]);
+        LOG("[nvn] ProgramSetShaders %p n=%d keys %s %s", (void *)p, n, k0, k1);
+    }
     mtl_prog_prefetch(o);   // its libraries load in the background now, not at its first draw
     return 1;
 }

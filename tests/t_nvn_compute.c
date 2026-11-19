@@ -78,7 +78,7 @@ int main(void) {
     CHECK(NVNF(nvnCommandBufferInitialize)(&cb, &dev) == 1, "command buffer initializes");
     NVNF(nvnCommandBufferAddCommandMemory)(&cb, &pool, 0x10000, 0x10000);
     NVNF(nvnCommandBufferBeginRecording)(&cb);
-    NVNF(nvnCommandBufferBindProgram)(&cb, &prog, 0);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog, NVN_SHADER_STAGE_COMPUTE_BIT);
     NVNF(nvnCommandBufferBindStorageBuffer)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNbufferAddress)(uintptr_t)out, 64 * 4);
     NVNF(nvnCommandBufferBindStorageBuffer)(&cb, NVN_SHADER_STAGE_COMPUTE, 1, (NVNbufferAddress)(uintptr_t)indirect_groups, 3 * 4);
     NVNF(nvnCommandBufferDispatchCompute)(&cb, 1, 1, 1); // shader writes the next command's group counts

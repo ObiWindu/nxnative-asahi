@@ -70,4 +70,34 @@ target_include_directories(nxnative_core PUBLIC
 target_compile_definitions(nxnative_core PUBLIC NX_LINUX=1)
 target_compile_options(nxnative_core PRIVATE $<$<COMPILE_LANGUAGE:C>:-include${CMAKE_CURRENT_SOURCE_DIR}/linux_compat.h>)
 target_link_libraries(nxnative_core PUBLIC nxnative_platform nxnative_memory nxnative_vkapi nxnative_vk Threads::Threads m ${CMAKE_DL_LIBS})
+# The movie library (the SDK's movie::Extractor / movie::Decoder, hle_movie.c)
+# needs a video decoder. On Linux that is libavcodec: build the host's movie
+# take-over and its H.264 / AAC back end when the headers are found (Fedora's
+# libavcodec-free-devel provides them under /usr/include/ffmpeg), and leave
+# movies out of the host otherwise. NXNATIVE_AVCODEC_INCLUDE_DIR and the two
+# library paths can be given for a tree that is not installed system-wide.
+option(NXNATIVE_MOVIES "Build the movie library take-over (needs libavcodec headers)" ON)
+if(NXNATIVE_MOVIES AND NOT APPLE)
+  find_path(NXNATIVE_AVCODEC_INCLUDE_DIR libavcodec/avcodec.h
+            HINTS ${NXNATIVE_FFMPEG_INCLUDE_DIR} $ENV{NXNATIVE_FFMPEG_INCLUDE_DIR}
+            PATH_SUFFIXES ffmpeg)
+  find_library(NXNATIVE_AVCODEC_LIBRARY NAMES avcodec)
+  find_library(NXNATIVE_AVUTIL_LIBRARY NAMES avutil)
+  find_library(NXNATIVE_VPX_LIBRARY NAMES vpx)
+  if(NOT NXNATIVE_VPX_LIBRARY)
+    find_file(NXNATIVE_VPX_LIBRARY NAMES libvpx.so.9 libvpx.so.6 libvpx.so)
+  endif()
+  if(NXNATIVE_AVCODEC_INCLUDE_DIR AND NXNATIVE_AVCODEC_LIBRARY AND NXNATIVE_AVUTIL_LIBRARY AND NXNATIVE_VPX_LIBRARY)
+    target_sources(nxnative_core PRIVATE
+      ${HOST_DIR}/hle_movie.c
+      ${HOST_DIR}/hle_movie_ffmpeg.c)
+    target_include_directories(nxnative_core PRIVATE ${NXNATIVE_AVCODEC_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/dm/third_party/stb_vorbis)
+    target_link_libraries(nxnative_core PUBLIC ${NXNATIVE_AVCODEC_LIBRARY} ${NXNATIVE_AVUTIL_LIBRARY} ${NXNATIVE_VPX_LIBRARY})
+    target_compile_definitions(nxnative_core PUBLIC NXNATIVE_MOVIES=1)
+    message(STATUS "movies: libavcodec ${NXNATIVE_AVCODEC_LIBRARY}, headers ${NXNATIVE_AVCODEC_INCLUDE_DIR}")
+  else()
+    message(STATUS "movies: libavcodec headers not found (install libavcodec-free-devel); the host plays no movies")
+  endif()
+endif()
+
 add_dependencies(nxnative_core game_profile)

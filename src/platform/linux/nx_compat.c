@@ -142,10 +142,10 @@ int nx_fd_path(int fd, char *out, size_t n) {
 #include <sys/syscall.h>
 
 static int copy_tree(const char *src, const char *dst) {
-    struct stat st;
+    struct stat st, dst_st;
     if (lstat(src, &st)) return -1;
-    if (lstat(dst, &st) == 0) { errno = EEXIST; return -1; }
-    if (S_ISDIR(st.st_mode)) return -1;
+    if (lstat(dst, &dst_st) == 0) { errno = EEXIST; return -1; }
+    if (errno != ENOENT) return -1;
     if (lstat(src, &st)) return -1;
     if (S_ISDIR(st.st_mode)) {
         if (mkdir(dst, st.st_mode & 07777) && errno != EEXIST) return -1;

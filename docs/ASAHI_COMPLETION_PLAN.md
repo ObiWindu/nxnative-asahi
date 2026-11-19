@@ -97,13 +97,43 @@ verified only when the checked-in test or a current local run exercises it.
   queries stay unknown and take the conservative draw path. The indexed test
   verifies both condition modes, timestamp report contents and suppression of
   clears/draws on M2 Pro Honeykrisp with validation.
-- A legal Picross S NSP is now present under `games/`, but its supplied
-  `prod.keys` and `title.keys` files are HTML repository pages rather than key
-  dumps. Import stops before extraction because the NCA header cannot be
-  decrypted, so no game code or shader trace has been collected yet.
-- At the baseline audit, neither a retail game nor a homebrew game image was
-  available. Synthetic guest and renderer success does not establish game
-  compatibility.
+- Follow-up: the first real game is brought up to a rendered frame. Picross S
+  GENESIS & Master System edition (`010089701567A000`, v1.0.0, Unity) is
+  prepared locally and runs natively headless: modules load and relocate, the
+  SDK, RomFS, HID and audio initialize, the main loop holds 60 fps for more
+  than 14,000 frames, and `NX_VK_PRESENT_DUMP` readback shows the rendered
+  title screen with its animated background; scripted input then reaches the
+  Main Menu, the puzzle list, the confirmation dialog and the puzzle scene
+  itself, all rendering correctly. Frame time is p50 16.7 ms there and about
+  30-42 ms in the menus and the puzzle with one synchronous submission per
+  replay operation; batching a whole NVN submission into one command buffer,
+  with one render pass across consecutive draws and hash tables for the
+  texture, view and registered-id lookups, brought the encode down to 0.3 ms
+  and keeps the puzzle at 60 fps (below). Four root causes were
+  fixed on the way, each with a regression or a documented check: `BindProgram`'s per-stage
+  stage bits (the replay kept one program and dropped every program without a
+  vertex stage; `t_nvn_stage_bind`), the reflection's `reg` being the NVN
+  uniform slot (a second -3 read every real shader's cbufs as zero;
+  `t_nvn_texture` now uses slot 1), route-B reflection paired by shader
+  variable name with the translator's `support_buffer` bound (the JSON's MSL
+  `arg_id` shifts when the support buffer is not a member), and D24/D24S8
+  substituted with D32 on Apple GPUs, which expose no 24-bit depth format. The
+  replay's persistent state also keeps its own copies of render-target and
+  program objects, because queue snapshots are freed when their submission
+  completes.
+- Follow-up: Super Mario Odyssey 1.0.0 is prepared and brought up on the same
+  host. Batching, persistent render passes, the lookup tables and upload
+  staleness by flush stamp (documented in
+  [NVN replay submissions, render passes and texture tables](reference/rendering.md#nvn-replay-submissions-render-passes-and-texture-tables-on-the-vulkan-replay))
+  took its first 3D scene from 140 ms a frame to about 18-21 ms, with no crash
+  over repeated multi-minute runs. The host's movie library is built on Linux
+  now (H.264 and AAC over libavcodec, [The movie library on Linux](reference/movies.md#the-movie-library-on-linux-libavcodec)),
+  the game's intro renders and its hint films play. Open: the game stops on
+  its loading screen at about 43 s (main thread waiting on a guest key, job
+  workers idle) and the present there is a flat picture while the 1600x900
+  scene target holds content; 60 fps needs another 1.5-2 ms in that scene.
+- Both prepared games were supplied legally and their keys work; no game file
+  is part of this repository.
 
 ## Gap matrix
 
@@ -141,7 +171,7 @@ verified only when the checked-in test or a current local run exercises it.
 | NVN2 mesh/task shaders | `src/graphics/nvn/nvn_vk_draw.inc`, `dm/gfx/nvn/hle_nvn.c`, `dm/gfx/tools/` | Stage detection exists, but replay rejects mesh/task shaders. | Translate NVN2 workgroup payload/mesh output and dispatch semantics to available Vulkan mesh-shader functionality or a semantics-preserving fallback; host features are not yet mapped to that ABI. | Inspect actual NVN2 shader metadata and Honeykrisp mesh-shader capabilities before selecting an execution path. | Synthetic payload/topology tests on supported hardware plus a real NVN2 title. |
 | Storage-image atomics, transform feedback and sparse pools | `src/graphics/nvn/nvn_vk_draw.inc`, `src/graphics/nvn/nvn_vk.c`, `src/graphics/vulkan/nx_vk.c`, `tests/t_nvn_compute_image.c` | R32UI `imageAtomicAdd` and R32I `imageAtomicAdd`/`imageAtomicOr` pass synthetic compute readback with validation on local Honeykrisp. Transform feedback and sparse-pool residency remain absent; other atomic formats/operations have not been covered. | Match NVN atomic operation/type/format constraints and implement capture/residency behavior where supported by device capabilities. | Add format/operation atomic cases when supported shader evidence requires them; implement transform feedback or sparse residency only after a workload requires it. | CPU-reference atomic tests across supported types, synthetic capture/residency checks and real workload validation. |
 | Advanced blend modes | `src/graphics/nvn/nvn_vk_draw.inc`, `src/graphics/vulkan/nx_vk.c`, `tests/t_nvn_advblend.c` | The renderer queries and enables `VK_EXT_blend_operation_advanced` only when advertised, and checks all-operation, attachment-count, overlap and source-premultiplication limits before building advanced pipelines. NVN modes map to the Vulkan equations; unsupported states retain the fixed-function Porter-Duff fallback or report unsupported modes. Pixel tests with validation cover ZERO, SRC, DST, SRC_OVER (premultiplied and straight), SRC_IN, PLUS, MULTIPLY, SCREEN, OVERLAY and DIFFERENCE on M2 Pro Honeykrisp. | Verify every equation and coverage-overlap behavior against an independent NVN/CPU reference; NVN's free-range normalized-destination setting has no mapped Vulkan state and currently falls back. | Extend reference comparisons across all NVN modes, overlap states, destination alpha and write masks; document the normalized-destination fallback until equivalent semantics are established. | CPU-reference pixel comparisons for each mode and state, plus a real game trace that exercises advanced equations. |
-| Game/version compatibility tiers | `scripts/build_asahi_from_nsp.py`, `dm/games/`, `docs/COMPATIBILITY.md` | Profiles and build-ID knowledge are extensive, but actual Linux retail gameplay is not established for this workspace. | Separate buildable/bootable/renderable/playable/verified evidence by build. | Record one game bring-up end-to-end before expanding status claims. | Import, ELF validation, boot, render, input/audio/save/progression/shutdown. |
+| Game/version compatibility tiers | `scripts/build_asahi_from_nsp.py`, `dm/games/`, `docs/COMPATIBILITY.md` | One retail game (Picross S GENESIS & Master System edition, `010089701567A000`, v1.0.0) is prepared, boots natively, holds 60 fps and renders its title screen headless on M2 Pro Honeykrisp; input, a real window, audio output and gameplay past the title are unverified, and no second title has been run. | Separate buildable/bootable/renderable/playable/verified evidence by build. | Record one game bring-up end-to-end before expanding status claims. | Import, ELF validation, boot, render, input/audio/save/progression/shutdown. |
 | Multi-game runtime and packaging | `CMakeLists.txt`, `scripts/build_asahi_games.sh`, `src/launcher/main.c`, `packaging/` | Profile-specific binaries and local RPM build paths exist; one universal profile binary and released repository/package are not complete. | Installable application must resolve profile/runtime and XDG storage independently of checkout. | Test installed RPM in a clean user environment and quantify whether runtime-profile refactor is needed. | Install/remove/reinstall and launch prepared game outside source tree. |
 
 ### Not implemented

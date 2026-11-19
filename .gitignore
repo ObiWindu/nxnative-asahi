@@ -21,3 +21,5 @@ build_*/
 cmake-build-*/
 out/
 dist/
+games/
+games/*

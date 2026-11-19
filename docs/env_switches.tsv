@@ -198,6 +198,7 @@ DM_NVN_PREDICT	switch	`0` turns off the parallel precompile look-ahead: a pipeli
 DM_NVN_PREFETCH	switch	`0` turns off loading a program's shader libraries in the background when the game makes it (`nvnProgramSetShaders`); they load at its first draw instead
 DM_NVN_PRESENT_FINISH	diagnostic	`=1` makes each present return once the GPU has run the frame, so the game never runs ahead of the GPU
 DM_NVN_PROF	diagnostic	`=1` wraps the implemented NVN functions in a timing wrapper and collects the time each takes during recording
+DM_NVN_PROGLOG	diagnostic	`=1` logs every `nvnProgramSetShaders` with the keys of its stages, and `nvnCommandBufferBindProgram` the stages it binds (per-stage program binding bring-up)
 DM_NVN_PROGTRACE	diagnostic	`=<vertex keys,...>` logs matching ProgramSetShaders calls and their guest backtraces
 DM_NVN_REGLUM	diagnostic	`=x0,y0,x1,y1:<file>` (normalized coordinates): on every present records the present number, time, mean luminance and a grayscale thumbnail of that region, to check animation speed against frame rate
 DM_NVN_REPORT_EXACT	switch	`0` refuses a partly covered uniform shadow over the whole 4 KB page of a counter report of a running submission, as before; by default only over the report's own 16 bytes, which the host writes when that submission completes
@@ -330,6 +331,7 @@ DM_RELAUNCH	switch	Set by `oe::RequestToRelaunchApplication` for the host it sta
 DM_RENDER_SCALE	player	`0.5` to `1.0`: fixes the game's 3D views at that fraction of their size and turns its dynamic resolution off, for builds with a render scale stub; `1.0` (the default) keeps it. Up to the stub's largest scale (`RENDER_SCALE` in its fixups table): Hades II's render size stub takes up to `3.0` (3840x2160)
 DM_RES_CHECK	diagnostic	`=1` prints the first 40 textures or buffers a shader reaches through its argument block that are not in the residency set (textures attributed to their parent allocation)
 DM_REWRITE_J	switch	`=<positive integer>`: worker processes per module for `patch_nso.py`'s x18 scan and spin wait search; `=1` runs serially. Default: one per core directly, an automatic per-module budget in the NSP script. An explicit value overrides that budget
+DM_REWRITE_PLATFORM	switch	`=linux` makes the rewriter's thread-pointer stubs read `TPIDR_EL0` (glibc's first-block slots on the Linux host) instead of Darwin's `TPIDRRO_EL0`; the Asahi NSP script sets it
 DM_ROMFS	path	The game's RomFS folder, mounted read-only as `rom` (default `$DM_ROOT/romfs`); the Mac launcher, the iOS app and the NSP script set it
 DM_ROMFS_OVERLAY	path	`=<dir>[:<dir>…]`: RomFS reads look in these folders first, in order, and fall back to `DM_ROMFS` (for a modified copy of some files)
 DM_ROOT	path	Workspace root (default `~/dm-work`): the host's and tools' default paths (RomFS, temporary storage, shader libraries under `build/cache/metal_shader_cache`, probe dumps) are under it

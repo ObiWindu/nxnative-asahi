@@ -31,6 +31,7 @@ System packages:
 - Optional: the `shaderc` runtime library for the NVN draw tests; they report
   SKIP when `libshaderc_shared.so.1` is absent.
 - `pipewire`/`pipewire-alsa` or ALSA for audio (SDL3 opens the default device; without one the sink runs silently at the correct rate).
+- Optional: `libavcodec-free-devel` and `libavutil-free-devel` (Fedora; headers under `/usr/include/ffmpeg`) plus the `libvpx` runtime, for the movie library: the host's `movie::Decoder` take-over decodes H.264 and AAC through libavcodec ([Movies](reference/movies.md#the-movie-library-on-linux-libavcodec)). Without them the host builds without movies, as before. `-DNXNATIVE_MOVIES=OFF` turns them off, and `-DNXNATIVE_AVCODEC_INCLUDE_DIR`, `-DNXNATIVE_AVCODEC_LIBRARY`, `-DNXNATIVE_AVUTIL_LIBRARY` and `-DNXNATIVE_VPX_LIBRARY` point the build at a tree that is not installed system-wide.
 
 No proprietary firmware, keys, games or Nintendo SDK files are shipped or
 required to build the tests.
@@ -193,7 +194,9 @@ SDL_VIDEODRIVER=dummy build/nxnative-asahi run <folder> main
 ```
 
 In a desktop session, SDL3 creates a Wayland (or X11) window and a Vulkan
-surface. Keyboard and gamepad input are read each poll.
+surface. Keyboard and gamepad input is read each poll. To see what a headless
+run renders, set `NX_VK_PRESENT_DUMP=<dir>[:<count>[:<every>]]`: the first
+presented frames (default 3) are written as `frame_<n>.ppm`.
 
 ## Tests
 
@@ -201,12 +204,12 @@ surface. Keyboard and gamepad input are read each poll.
 ctest --test-dir build --output-on-failure
 ```
 
-A profile build runs forty-two tests. A platform-only build (no
+A profile build runs forty-three tests. A platform-only build (no
 `NXNATIVE_GAME`) runs the ten that do not need the guest host: the memory,
 Vulkan, Vulkan-interception, shader-cache, PCM and launcher tests. The NVN
 replay tests and `AudioOut` need a profile.
 
-Forty-two tests (profile build):
+Forty-three tests (profile build):
 
 | Test | What it proves |
 |---|---|
@@ -233,6 +236,7 @@ Forty-two tests (profile build):
 | `nvn_drawtex` | `nvnCommandBufferDrawTexture`: source/destination regions, scissor, mirrored destination and the channel mask |
 | `nvn_readback` | CPU texture reads of 3D slices, array layers and block-compressed blocks, and block-aware copies |
 | `nvn_view_swizzle` | Texture view/builder channel swizzles, an sRGB-format twin and RGBX's alpha-1 read |
+| `nvn_stage_bind` | A vertex-only and a fragment-only program bound per stage combine for a draw |
 | `nvn_copy` | Buffer/texture and texture/texture copies with byte-exact round trip; masked and rectangular texture clears |
 | `nvn_compute` | Compute program, SSBO binding, dispatch and guest-memory copy-back |
 | `nvn_compute_image` | Compute storage-image write and readback |

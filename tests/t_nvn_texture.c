@@ -70,7 +70,7 @@ int main(void) {
     if (put(path, fsp, fsn)) { printf("FAIL: write fs\n"); return 1; }
     snprintf(path, sizeof path, "%s/%s_b.json", dir, fkey);
     const char *fsjson = "{\"stage\":\"ps\",\"entry\":\"main\",\"bindings\":["
-        "{\"arg_id\":1,\"kind\":\"cbuf\",\"reg\":3},"
+        "{\"arg_id\":1,\"kind\":\"cbuf\",\"reg\":1},"
         "{\"arg_id\":2,\"kind\":\"tex\",\"reg\":0}],\"vertex_inputs\":[],\"raster\":{\"colors\":[0]}}\n";
     if (put(path, fsjson, strlen(fsjson))) { printf("FAIL: write fs json\n"); return 1; }
 
@@ -125,7 +125,8 @@ int main(void) {
     CHECK(NVNF(nvnSamplerInitialize)(&smp, &sb) == 1, "sampler initializes");
     NVNF(nvnSamplerPoolRegisterSampler)(&spool, 1, &smp);
 
-    // Uniform slot 0 for the fragment stage: the shader's c[3] (cbuf reg 3).
+    // Uniform slot 1 for the fragment stage (the shader's c[4], cbuf reg 1;
+    // the reflection's reg is the slot, not the c-bank number).
     float *tint = (float *)(storage + 0x60000);
     tint[0] = 0; tint[1] = 0; tint[2] = 1; tint[3] = 1;
     *(uint32_t *)(storage + 0x60010) = 16;
@@ -153,7 +154,7 @@ int main(void) {
     float blue[4] = {0, 0, 1, 1};
     NVNF(nvnCommandBufferClearColor)(&cb, 0, blue, 0xf);
     NVNF(nvnCommandBufferBindProgram)(&cb, &prog, 3);
-    NVNF(nvnCommandBufferBindUniformBuffer)(&cb, NVN_SHADER_STAGE_FRAGMENT, 0, (NVNbufferAddress)(uintptr_t)tint, 32);
+    NVNF(nvnCommandBufferBindUniformBuffer)(&cb, NVN_SHADER_STAGE_FRAGMENT, 1, (NVNbufferAddress)(uintptr_t)tint, 32);
     for (int i = 0; i < ARRAY_TEX_COUNT; i++)
         NVNF(nvnCommandBufferBindTexture)(&cb, NVN_SHADER_STAGE_FRAGMENT, i, (NVNtextureHandle)((i + 1) | (1 << 20)));
     NVNvertexAttribState va;

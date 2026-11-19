@@ -163,7 +163,7 @@ int main(void) {
     uint64_t barriers_before = 0;
     mtl_barrier_stats(NULL, &barriers_before);
     NVNF(nvnCommandBufferBeginRecording)(&cb);
-    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_write, 0);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_write, NVN_SHADER_STAGE_COMPUTE_BIT);
     NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNimageHandle)1);
     NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 1, (NVNimageHandle)2);
     NVNF(nvnCommandBufferDispatchCompute)(&cb, 2, 1, 1);
@@ -176,12 +176,12 @@ int main(void) {
     results[0] = results[1] = 0;
     NVNF(nvnCommandBufferBindStorageBuffer)(&cb, NVN_SHADER_STAGE_COMPUTE, 0,
         (NVNbufferAddress)(uintptr_t)results, 2 * sizeof *results);
-    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_read, 0);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_read, NVN_SHADER_STAGE_COMPUTE_BIT);
     NVNF(nvnCommandBufferDispatchCompute)(&cb, 2, 1, 1);
-    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_atomic, 0);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_atomic, NVN_SHADER_STAGE_COMPUTE_BIT);
     NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNimageHandle)3);
     NVNF(nvnCommandBufferDispatchCompute)(&cb, 4, 1, 1);
-    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_signed_atomic, 0);
+    NVNF(nvnCommandBufferBindProgram)(&cb, &prog_signed_atomic, NVN_SHADER_STAGE_COMPUTE_BIT);
     NVNF(nvnCommandBufferBindImage)(&cb, NVN_SHADER_STAGE_COMPUTE, 0, (NVNimageHandle)4);
     NVNF(nvnCommandBufferDispatchCompute)(&cb, 4, 1, 1);
     NVNcommandHandle h = NVNF(nvnCommandBufferEndRecording)(&cb);

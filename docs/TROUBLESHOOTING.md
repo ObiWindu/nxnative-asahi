@@ -143,6 +143,31 @@ environment it would start. The saves screen backs up (`B`), restores the newest
 backup (`R`) and deletes (`D`, twice) only the selected game's `save` and
 `save_device` folders.
 
+## Keyboard controls
+
+The window's keyboard is player 1, ORed with a connected gamepad (one SDL3
+gamepad is supported). The mapping is in `keyboard_buttons` / `poll_input`
+(`src/platform/linux/nx_window_sdl.c`):
+
+| Switch button | Key |
+|---|---|
+| A | `Space` or `Z` |
+| B | `X` |
+| X | `C` |
+| Y | `V` |
+| L / R | `Q` / `E` |
+| ZL / ZR | `1` / `2` |
+| + / − | `Enter` / `Backspace` |
+| D-pad | the arrow keys |
+| Left stick | `W` `A` `S` `D` (up, left, down, right) |
+| Right stick (camera) | `I` `J` `K` `L` (up, left, down, right) |
+| L3 / R3 (stick click) | `F` / `G` (`S` and `L` also click, as they are stick directions) |
+
+The letter keys move the sticks: the keyboard's `A` is the left stick's left,
+not the A button. The window must be focused. The mouse and touch are not
+forwarded on the Linux front end; scripted input uses `DM_KEYS`
+([Scripted input](agents/05-debugging.md#scripted-input-and-thread-scheduling)).
+
 ## Gamepads are not detected
 
 The current front end supports one SDL3 gamepad and the keyboard. Check:

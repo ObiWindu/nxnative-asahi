@@ -66,15 +66,16 @@ def test_unreal_shader_stamp_hashes_pak_and_iostore_payloads(tmp_path):
 
 def test_generated_run_script_exports_capture_environment(tmp_path):
     host = tmp_path / 'fake host.sh'
-    host.write_text('#!/bin/sh\nprintf "%s\\n" "$DM_GLSLC_CAPTURE"\n')
+    host.write_text('#!/bin/sh\nprintf "capture=%s\\nargs=%s\\n" "$DM_GLSLC_CAPTURE" "$*"\n')
     host.chmod(0o755)
     capture = tmp_path / 'capture output'
+    patched = tmp_path / 'patched main'
     script = tmp_path / 'run.sh'
-    script.write_text(asahi.game_run_script(host, tmp_path / 'patched main', {'DM_GLSLC_CAPTURE': capture}))
+    script.write_text(asahi.game_run_script(host, patched, {'DM_GLSLC_CAPTURE': capture}))
     script.chmod(0o755)
 
     result = subprocess.run([script], check=True, capture_output=True, text=True)
-    assert result.stdout.strip() == str(capture)
+    assert result.stdout.splitlines() == [f'capture={capture}', f'args=run {patched}']
 
 
 @pytest.mark.parametrize('field', ['ue_decode', 'oodle_packs', 'ue_legacy'])
